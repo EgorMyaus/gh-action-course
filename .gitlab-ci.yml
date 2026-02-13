@@ -1,0 +1,309 @@
+# =============================================================================
+# GitLab CI/CD Pipeline for React App with Playwright E2E Tests
+# =============================================================================
+# Pipeline stages:
+#   1. test      - Unit tests and linting
+#   2. security  - SAST, dependency scanning, container scanning
+#   3. build     - Build Docker image
+#   4. deploy-staging - Deploy to staging environment
+#   5. e2e-test  - Run Playwright E2E tests against staging
+#   6. performance - k6 performance tests
+#   7. deploy-production - Deploy to production (manual trigger)
+# =============================================================================
+
+stages:
+  - test
+  - security
+  - build
+  - deploy-staging
+  - e2e-test
+  - performance
+  - deploy-production
+
+# Include GitLab security scanning templates
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+
+# =============================================================================
+# Variables
+# =============================================================================
+variables:
+  DOCKER_IMAGE: $CI_REGISTRY_IMAGE
+  DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+  DOCKER_TLS_CERTDIR: "/certs"
+  NODE_VERSION: "18"
+
+# =============================================================================
+# Cache Configuration
+# =============================================================================
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - node_modules/
+    - .yarn/cache/
+
+# =============================================================================
+# Default Settings
+# =============================================================================
+default:
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+# =============================================================================
+# STAGE: Test
+# =============================================================================
+
+unit-tests:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  before_script:
+    - yarn install --frozen-lockfile
+  script:
+    - yarn test --coverage --watchAll=false --ci
+  coverage: /All files[^|]*\|[^|]*\s+([\d\.]+)/
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/
+    expire_in: 7 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+lint:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  before_script:
+    - yarn install --frozen-lockfile
+  script:
+    - yarn lint || true  # Don't fail pipeline on lint errors
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+# =============================================================================
+# STAGE: Build
+# =============================================================================
+
+build-image:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - echo "Building Docker image..."
+    - docker build 
+        --cache-from $DOCKER_IMAGE:latest 
+        -t $DOCKER_IMAGE:$DOCKER_TAG 
+        -t $DOCKER_IMAGE:latest 
+        -t $DOCKER_IMAGE:$CI_COMMIT_REF_SLUG 
+        .
+    - echo "Pushing Docker images..."
+    - docker push $DOCKER_IMAGE:$DOCKER_TAG
+    - docker push $DOCKER_IMAGE:latest
+    - docker push $DOCKER_IMAGE:$CI_COMMIT_REF_SLUG
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+# =============================================================================
+# STAGE: Deploy Staging
+# =============================================================================
+
+deploy-staging:
+  stage: deploy-staging
+  image: alpine/helm:3.12.0
+  before_script:
+    - apk add --no-cache kubectl curl
+    - echo "$KUBE_CONFIG_STAGING" | base64 -d > /tmp/kubeconfig
+    - export KUBECONFIG=/tmp/kubeconfig
+  script:
+    - echo "Deploying to staging..."
+    - helm upgrade --install react-app ./helm/react-app-chart
+        --namespace react-app-staging
+        --create-namespace
+        --set image.repository=$DOCKER_IMAGE
+        --set image.tag=$DOCKER_TAG
+        --set ingress.hosts[0].host=staging.your-domain.com
+        --set replicaCount=2
+        --wait
+        --timeout 5m
+    - echo "Waiting for deployment to be ready..."
+    - kubectl rollout status deployment/react-app -n react-app-staging --timeout=300s
+  environment:
+    name: staging
+    url: https://staging.your-domain.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+# =============================================================================
+# STAGE: E2E Tests
+# =============================================================================
+
+e2e-tests:
+  stage: e2e-test
+  image: mcr.microsoft.com/playwright:v1.40.0-focal
+  variables:
+    BASE_URL: https://staging.your-domain.com
+    CI: "true"
+    # ReportPortal Configuration
+    RP_ENDPOINT: ${RP_ENDPOINT:-http://reportportal:8080/api/v1}
+    RP_PROJECT: ${RP_PROJECT:-default_personal}
+    RP_TOKEN: ${RP_TOKEN}
+    RP_LAUNCH: "E2E Tests - ${CI_COMMIT_REF_NAME}"
+  before_script:
+    - cd e2e
+    - npm ci
+    - npx playwright install --with-deps
+  script:
+    - echo "Running E2E tests against staging..."
+    - |
+      if [ -n "$RP_TOKEN" ]; then
+        echo "Reporting to ReportPortal..."
+        npm run cucumber:reportportal
+      else
+        echo "RP_TOKEN not set, using standard reporter..."
+        npm run cucumber:localhost
+      fi
+  after_script:
+    - echo "E2E tests completed"
+  artifacts:
+    when: always
+    paths:
+      - e2e/reports/
+      - e2e/test-results/
+    expire_in: 14 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+  needs:
+    - deploy-staging
+  allow_failure: false
+
+# =============================================================================
+# STAGE: Deploy Production
+# =============================================================================
+
+deploy-production:
+  stage: deploy-production
+  image: alpine/helm:3.12.0
+  before_script:
+    - apk add --no-cache kubectl curl
+    - echo "$KUBE_CONFIG_PROD" | base64 -d > /tmp/kubeconfig
+    - export KUBECONFIG=/tmp/kubeconfig
+  script:
+    - echo "Deploying to production..."
+    - helm upgrade --install react-app ./helm/react-app-chart
+        --namespace react-app-prod
+        --create-namespace
+        --set image.repository=$DOCKER_IMAGE
+        --set image.tag=$DOCKER_TAG
+        --set ingress.hosts[0].host=your-domain.com
+        --set replicaCount=3
+        --set autoscaling.enabled=true
+        --set autoscaling.minReplicas=3
+        --set autoscaling.maxReplicas=10
+        --wait
+        --timeout 5m
+    - echo "Waiting for deployment to be ready..."
+    - kubectl rollout status deployment/react-app -n react-app-prod --timeout=300s
+  environment:
+    name: production
+    url: https://your-domain.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  when: manual  # Require manual approval for production
+
+# =============================================================================
+# STAGE: Performance Tests
+# =============================================================================
+
+performance-smoke:
+  stage: performance
+  image: grafana/k6:0.47.0
+  variables:
+    BASE_URL: https://staging.your-domain.com
+    API_URL: https://staging.your-domain.com/api
+  script:
+    - k6 run --out json=performance-results.json performance/scripts/smoke-test.js
+  artifacts:
+    when: always
+    paths:
+      - performance-results.json
+    expire_in: 7 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+  needs:
+    - deploy-staging
+  allow_failure: true
+
+performance-load:
+  stage: performance
+  image: grafana/k6:0.47.0
+  variables:
+    BASE_URL: https://staging.your-domain.com
+    API_URL: https://staging.your-domain.com/api
+  script:
+    - k6 run --out json=load-test-results.json performance/scripts/load-test.js
+  artifacts:
+    when: always
+    paths:
+      - load-test-results.json
+    expire_in: 7 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  when: manual
+  allow_failure: true
+
+# =============================================================================
+# Security Scanning Overrides
+# =============================================================================
+
+sast:
+  stage: security
+  variables:
+    SAST_EXCLUDED_PATHS: "node_modules, e2e/node_modules, .yarn"
+
+dependency_scanning:
+  stage: security
+  variables:
+    DS_EXCLUDED_PATHS: "e2e/node_modules"
+
+container_scanning:
+  stage: security
+  variables:
+    CS_IMAGE: $DOCKER_IMAGE:$DOCKER_TAG
+  needs:
+    - build-image
+
+secret_detection:
+  stage: security
+
+# =============================================================================
+# Optional: Cleanup old images
+# =============================================================================
+
+cleanup-registry:
+  stage: .post
+  image: alpine:latest
+  script:
+    - echo "Cleanup would go here..."
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  when: manual
+  allow_failure: true

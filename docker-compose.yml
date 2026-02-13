@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # React Application (Frontend)
+  # ==========================================================================
+  react-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: react-app:latest
+    container_name: react-app
+    ports:
+      - "80:80"
+    environment:
+      - REACT_APP_USE_LOCAL_DATA=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - app-network
+
+  # ==========================================================================
+  # Backend API (for production with database)
+  # ==========================================================================
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: react-app-api:latest
+    container_name: react-app-api
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - USE_DATABASE=${USE_DATABASE:-false}
+      - DB_HOST=${DB_HOST:-localhost}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-reactapp}
+      - DB_USER=${DB_USER:-dbadmin}
+      - DB_PASSWORD=${DB_PASSWORD:-}
+      - DB_SSL=${DB_SSL:-false}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    profiles:
+      - production
+    networks:
+      - app-network
+
+  # ==========================================================================
+  # E2E Tests (run with: docker-compose --profile test up)
+  # ==========================================================================
+  e2e-tests:
+    image: mcr.microsoft.com/playwright:v1.40.0-focal
+    container_name: playwright-tests
+    volumes:
+      - ./e2e:/app/e2e
+      - ./package.json:/app/package.json
+    working_dir: /app
+    environment:
+      - BASE_URL=http://react-app
+      - CI=true
+    depends_on:
+      react-app:
+        condition: service_healthy
+    command: >
+      sh -c "cd e2e && npm install && npx playwright test"
+    profiles:
+      - test
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: react-app-chart
+description: A Helm chart for React application with Playwright E2E tests
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+maintainers:
+  - name: DevOps Team
+    email: devops@example.com
+keywords:
+  - react
+  - nginx
+  - playwright
+  - e2e

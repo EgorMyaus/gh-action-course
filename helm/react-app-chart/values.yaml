@@ -1,0 +1,206 @@
+# =============================================================================
+# React App Helm Chart - Default Values
+# =============================================================================
+# Supports: Reliability, Auto-scaling, Zero-downtime, Monitoring
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# REPLICAS & SCALING
+# -----------------------------------------------------------------------------
+replicaCount: 3
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# -----------------------------------------------------------------------------
+# CONTAINER IMAGE
+# -----------------------------------------------------------------------------
+image:
+  repository: your-registry/react-app
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# ZERO-DOWNTIME DEPLOYMENT
+# -----------------------------------------------------------------------------
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# Pod Disruption Budget for reliability
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# Graceful shutdown
+terminationGracePeriodSeconds: 30
+
+# -----------------------------------------------------------------------------
+# HEALTH CHECKS
+# -----------------------------------------------------------------------------
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+# -----------------------------------------------------------------------------
+# SERVICE & NETWORKING
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+  hosts:
+    - host: your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: react-app-tls
+      hosts:
+        - your-domain.com
+
+# -----------------------------------------------------------------------------
+# RESOURCES
+# -----------------------------------------------------------------------------
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# -----------------------------------------------------------------------------
+# MONITORING (Prometheus)
+# -----------------------------------------------------------------------------
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    path: /metrics
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "80"
+    prometheus.io/path: "/metrics"
+
+# -----------------------------------------------------------------------------
+# POD CONFIGURATION
+# -----------------------------------------------------------------------------
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# -----------------------------------------------------------------------------
+# SCHEDULING
+# -----------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+
+# Pod anti-affinity for high availability
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: react-app
+          topologyKey: kubernetes.io/hostname
+
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway
+
+# -----------------------------------------------------------------------------
+# ENVIRONMENT VARIABLES
+# -----------------------------------------------------------------------------
+env:
+  - name: NODE_ENV
+    value: production
+
+envFrom: []
+
+# -----------------------------------------------------------------------------
+# BACKEND API (optional)
+# -----------------------------------------------------------------------------
+api:
+  enabled: false
+  replicaCount: 2
+  image:
+    repository: your-registry/react-app-api
+    tag: "latest"
+  port: 3001
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  env:
+    - name: NODE_ENV
+      value: production
+    - name: USE_DATABASE
+      value: "true"

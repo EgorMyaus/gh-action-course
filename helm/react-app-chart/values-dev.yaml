@@ -1,0 +1,59 @@
+# =============================================================================
+# Development Environment Values
+# =============================================================================
+# Usage: helm upgrade --install react-app . -f values-dev.yaml
+# =============================================================================
+
+replicaCount: 1
+
+autoscaling:
+  enabled: false
+
+image:
+  repository: your-registry/react-app
+  tag: "dev"
+  pullPolicy: Always
+
+ingress:
+  enabled: true
+  hosts:
+    - host: dev.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: react-app-dev-tls
+      hosts:
+        - dev.your-domain.com
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Disable PDB for dev (single replica)
+podDisruptionBudget:
+  enabled: false
+
+# Simpler security for dev
+podSecurityContext: {}
+securityContext: {}
+
+# No zone spreading for dev
+topologySpreadConstraints:
+  enabled: false
+
+affinity: {}
+
+env:
+  - name: NODE_ENV
+    value: development
+  - name: REACT_APP_USE_LOCAL_DATA
+    value: "true"
+
+# Backend API disabled in dev
+api:
+  enabled: false

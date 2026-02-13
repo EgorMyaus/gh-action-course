@@ -1,0 +1,203 @@
+# =============================================================================
+# ReportPortal Helm Chart Values
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# GLOBAL
+# -----------------------------------------------------------------------------
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# -----------------------------------------------------------------------------
+# REPORTPORTAL SERVICES
+# -----------------------------------------------------------------------------
+
+# API Service
+api:
+  replicaCount: 1
+  image:
+    repository: reportportal/service-api
+    tag: "5.10.0"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  env:
+    JAVA_OPTS: "-Xmx1g -XX:+HeapDumpOnOutOfMemoryError"
+
+# Authorization Service (UAT)
+uat:
+  replicaCount: 1
+  image:
+    repository: reportportal/service-authorization
+    tag: "5.10.0"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+  sessionLive: 86400
+
+# UI Service
+ui:
+  replicaCount: 1
+  image:
+    repository: reportportal/service-ui
+    tag: "5.10.0"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Index Service
+index:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: reportportal/service-index
+    tag: "5.10.0"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Analyzer Service (AI-based failure analysis)
+analyzer:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: reportportal/service-auto-analyzer
+    tag: "5.10.0"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# Migrations Job
+migrations:
+  image:
+    repository: reportportal/migrations
+    tag: "5.10.0"
+    pullPolicy: IfNotPresent
+
+# -----------------------------------------------------------------------------
+# INGRESS
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "128m"
+  hosts:
+    - host: reportportal.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: reportportal-tls
+      hosts:
+        - reportportal.your-domain.com
+
+# -----------------------------------------------------------------------------
+# DEPENDENCIES (Bitnami Charts)
+# -----------------------------------------------------------------------------
+
+# PostgreSQL
+postgresql:
+  enabled: true
+  auth:
+    username: rpuser
+    password: rppass
+    database: reportportal
+  primary:
+    persistence:
+      size: 10Gi
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 500m
+        memory: 512Mi
+
+# RabbitMQ
+rabbitmq:
+  enabled: true
+  auth:
+    username: rabbitmq
+    password: rabbitmq
+  persistence:
+    size: 5Gi
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# OpenSearch
+opensearch:
+  enabled: true
+  singleNode: true
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  persistence:
+    size: 10Gi
+
+# MinIO
+minio:
+  enabled: true
+  auth:
+    rootUser: minio
+    rootPassword: minio123
+  persistence:
+    size: 10Gi
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# -----------------------------------------------------------------------------
+# SERVICE ACCOUNT
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# POD DISRUPTION BUDGET
+# -----------------------------------------------------------------------------
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1

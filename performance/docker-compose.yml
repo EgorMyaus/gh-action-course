@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # k6 - Performance Testing
+  # ==========================================================================
+  k6:
+    image: grafana/k6:0.47.0
+    container_name: k6-runner
+    volumes:
+      - ./scripts:/scripts
+      - ./results:/results
+    environment:
+      - K6_OUT=json=/results/results.json
+      - BASE_URL=${BASE_URL:-http://host.docker.internal}
+      - API_URL=${API_URL:-http://host.docker.internal:3001}
+    networks:
+      - performance
+    profiles:
+      - test
+
+  # ==========================================================================
+  # InfluxDB - Time Series Database for k6 Results
+  # ==========================================================================
+  influxdb:
+    image: influxdb:1.8
+    container_name: k6-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - INFLUXDB_DB=k6
+      - INFLUXDB_HTTP_AUTH_ENABLED=false
+    volumes:
+      - influxdb_data:/var/lib/influxdb
+    networks:
+      - performance
+
+  # ==========================================================================
+  # Grafana - k6 Results Visualization
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: k6-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - influxdb
+    networks:
+      - performance
+
+networks:
+  performance:
+    driver: bridge
+
+volumes:
+  influxdb_data:
+  grafana_data:
