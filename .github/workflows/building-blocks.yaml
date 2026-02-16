@@ -1,0 +1,20 @@
+name: building-blocks
+
+on: [push, pull_request]
+
+jobs:
+    echo-hello:
+        runs-on: ubuntu-latest
+        steps:
+            - name: echo hello
+              run: echo hello
+    echo-goodbye:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Filed step
+              run: |
+                echo I will fail
+                exit 1
+            - name: Say goodbye
+              run: echo Goodbye
+  
