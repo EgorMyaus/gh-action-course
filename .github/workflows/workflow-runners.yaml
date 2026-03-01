@@ -1,0 +1,11 @@
+name: Workflow Runners
+on: push
+jobs:
+  ubuntu-echo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show OS info
+        run: |
+          echo "Runner: ${{ runner.name }}"
+          echo "OS: ${{ runner.os }}"
+          echo "Arch: ${{ runner.arch }}"
