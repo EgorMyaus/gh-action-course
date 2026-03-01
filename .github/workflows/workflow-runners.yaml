@@ -9,3 +9,20 @@ jobs:
           echo "Runner: ${{ runner.name }}"
           echo "OS: ${{ runner.os }}"
           echo "Arch: ${{ runner.arch }}"
+  windows-echo:
+    runs-on: windows-latest
+    steps:
+      - name: Show OS info
+        run: |
+          echo "Runner: ${{ runner.name }}"
+          echo "OS: ${{ runner.os }}"
+          echo "Arch: ${{ runner.arch }}"
+  macos-echo:
+    runs-on: macos-latest
+    steps:
+      - name: Show OS info
+        run: |
+          echo "Runner: ${{ runner.name }}"
+          echo "OS: ${{ runner.os }}"
+          echo "Arch: ${{ runner.arch }}"
+    
