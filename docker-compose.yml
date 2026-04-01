@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ==========================================================================
   # React Application (Frontend)
@@ -58,23 +56,27 @@ services:
       - app-network
 
   # ==========================================================================
-  # E2E Tests (run with: docker-compose --profile test up)
+  # E2E Tests — Cucumber + Playwright
+  # Run smoke:  docker compose --profile test run e2e-tests
+  # Run regression: docker compose --profile test run -e CUCUMBER_PROFILE=regression e2e-tests
   # ==========================================================================
   e2e-tests:
-    image: mcr.microsoft.com/playwright:v1.40.0-focal
-    container_name: playwright-tests
+    build:
+      context: ./e2e
+      dockerfile: Dockerfile
+    image: e2e-tests:latest
+    container_name: cucumber-playwright-tests
     volumes:
-      - ./e2e:/app/e2e
-      - ./package.json:/app/package.json
-    working_dir: /app
+      - ./e2e/reports:/app/reports
+      - ./e2e/config/hosts.docker.json:/app/config/hosts.json:ro
     environment:
-      - BASE_URL=http://react-app
-      - CI=true
+      - NODE_ENV=localhost
+      - COMMON_CONFIG_FILE=env/common.env
+      - HEADLESS=true
+      - CUCUMBER_PROFILE=smoke
     depends_on:
       react-app:
         condition: service_healthy
-    command: >
-      sh -c "cd e2e && npm install && npx playwright test"
     profiles:
       - test
     networks:

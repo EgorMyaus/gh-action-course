@@ -19,6 +19,7 @@ Feature: As a user I expect to be able to validate a new contact
     And the "error message" should contain the text "Error: The "city" field can't be empty."
     And I fill in the "city" input with "Springfield"
     And I click the "save" button
+    And I am directed to the "home" page
 
     And I fill in the "search" input with "Bart Simpson"
     And the "contact" should be displayed
@@ -75,6 +76,7 @@ Feature: As a user I expect to be able to validate a new contact
     And the "error message" should contain the text "Error: The "city" field can't be empty."
     And I fill in the "city" input with "Springfield"
     And I click the "save" button
+    And I am directed to the "home" page
 
     And I fill in the "search" input with "Bart Simpson"
     And the "contact" should be displayed

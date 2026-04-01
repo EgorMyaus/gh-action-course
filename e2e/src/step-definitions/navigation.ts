@@ -7,11 +7,11 @@ import {
 import { ScenarioWorld } from './setup/world'
 import { waitFor } from '../support/wait-for-behavior'
 import { PageId } from '../env/global'
-import {logger} from "../logger"
+import { logger } from "../logger"
 
 Given(
     /^I am on the "([^"]*)" page$/,
-    async function(this: ScenarioWorld, pageId: PageId) {
+    async function (this: ScenarioWorld, pageId: PageId) {
         const {
             screen: { page },
             globalConfig,
@@ -41,7 +41,8 @@ Given(
 
         await waitFor(() => currentPathMatchesPageId(page, pageId, globalConfig), globalConfig, {
             target: pageId,
-            type: 'page'
+            type: 'page',
+            timeout: 20000,
         })
     }
 )
@@ -50,7 +51,7 @@ Given(
     /^I refresh the "([^"]*)" page$/,
     async function (this: ScenarioWorld, pageId: PageId) {
         const {
-            screen: {page},
+            screen: { page },
             globalConfig,
         } = this
 

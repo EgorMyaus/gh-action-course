@@ -6,7 +6,7 @@ import playwright, {
     BrowserType
 } from "playwright"
 import { env } from '../../env/parseEnv'
-import { World, IWorldOptions, setWorldConstructor} from "@cucumber/cucumber"
+import { World, IWorldOptions, setWorldConstructor } from "@cucumber/cucumber"
 import { GlobalConfig, GlobalVariables } from '../../env/global'
 
 export type Screen = {
@@ -51,7 +51,6 @@ export class ScenarioWorld extends World {
 
         const browserType: BrowserType = playwright[automationBrowser]
         const browser = await browserType.launch({
-            devtools: process.env.DEVTOOLS !== 'false',
             headless: process.env.HEADLESS !== 'false',
             args: ['--disable-web-security', '--disable-features=IsolateOrigins, site-per-process'],
         })

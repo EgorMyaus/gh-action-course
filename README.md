@@ -6,13 +6,13 @@ A React application with comprehensive cloud infrastructure, E2E testing with Pl
 
 ```bash
 # Install dependencies
-npm install
+yarn install
 
 # Start development server
-npm start
+yarn start
 
-# Run E2E tests
-cd e2e && npm install && npx playwright test
+# In a separate terminal — run E2E tests
+cd e2e && yarn install && yarn cucumber:localhost -p smoke
 ```
 
 ## Project Structure
@@ -42,46 +42,137 @@ cd e2e && npm install && npx playwright test
 
 ## Running Locally
 
-### Frontend Only (E2E/Dev mode)
+### Option 1: Without Docker (fastest for development)
+
 ```bash
-npm start
-# Uses in-memory data from contacts.json
+# Terminal 1 — Start the React app
+yarn install
+yarn start
+# App runs at http://localhost:3000 (uses in-memory data from contacts.json)
+# Wait for "Compiled successfully" before running tests
+
+# Terminal 2 — Run E2E tests
+cd e2e
+yarn install
+yarn cucumber:localhost -p smoke       # smoke tests
+yarn cucumber:localhost -p regression  # full regression
+yarn cucumber:localhost -p dev         # dev tagged tests
 ```
 
-### With Backend API
+> **Note:** The `.env` file must contain `REACT_APP_USE_LOCAL_DATA=true` for the app to work without a backend.
+
+### Option 2: App in Docker, Tests Locally (best for debugging)
+
+Run the React app in a Docker container and execute tests from your machine with full Playwright debugging support.
+
+```bash
+# Start the app container (serves at http://localhost:80)
+docker compose up -d react-app --build
+
+# Run smoke tests locally against the Docker container
+cd e2e
+yarn install
+yarn cucumber:docker -p smoke          # smoke tests (headed)
+yarn cucumber:docker -p regression     # full regression
+
+# Debug with Playwright Inspector (step-through, DOM picker)
+yarn cucumber:docker:debug -p smoke
+
+# When done
+docker compose down
+```
+
+### Option 3: Fully Containerized (CI / one command)
+
+Both the app and the tests run inside Docker containers — no local dependencies needed.
+
+```bash
+# App + smoke tests (builds everything, runs headlessly)
+docker compose --profile test run --build e2e-tests
+
+# App + regression tests
+docker compose --profile test run --build -e CUCUMBER_PROFILE=regression e2e-tests
+
+# Start app in background, run tests whenever you want
+docker compose up -d react-app --build
+docker compose --profile test run e2e-tests
+docker compose down
+```
+
+Test reports are saved to `./e2e/reports/` on your host machine.
+
+### Option 4: With Backend API (production-like)
+
 ```bash
 # Terminal 1: Start API
 cd server && npm install && npm run dev
 
-# Terminal 2: Start frontend
-REACT_APP_USE_LOCAL_DATA=false npm start
-```
+# Terminal 2: Start frontend against the API
+REACT_APP_USE_LOCAL_DATA=false yarn start
 
-### With Docker
-```bash
-# E2E mode (no backend)
-docker-compose up
-
-# Production mode (with API)
-docker-compose --profile production up
+# Or with Docker Compose
+docker compose --profile production up
 ```
 
 ## Testing
 
-### E2E Tests (Playwright)
+### E2E Tests (Cucumber + Playwright)
+
+This project uses **Cucumber** as the test runner with **Playwright** for browser automation.
+
+All test commands run from the `e2e/` directory:
+
 ```bash
 cd e2e
-npm install
-npx playwright test
-npx playwright test --ui  # Interactive mode
+yarn install
 ```
 
+### Available Scripts
+
+| Script | Description |
+|--------|-------------|
+| `yarn cucumber:localhost -p smoke` | Run against local dev server (`localhost:3000`) |
+| `yarn cucumber:docker -p smoke` | Run against Docker container (`localhost:80`) |
+| `yarn cucumber:docker:debug -p smoke` | Debug against Docker container with Playwright Inspector |
+| `yarn cucumber:debug -p smoke` | Debug against local dev server with Playwright Inspector |
+| `yarn cucumber:production -p smoke` | Run against production |
+| `yarn cucumber:reportportal -p smoke` | Run with ReportPortal reporting |
+
+### Profiles
+
+| Profile | Description |
+|---------|-------------|
+| `-p smoke` | Smoke tests (fast subset) |
+| `-p regression` | Full regression suite |
+| `-p dev` | Dev tagged tests only |
+
+### Playwright Debugging Tools
+
+Since the project uses Cucumber (not `npx playwright test`), Playwright's `--ui` mode is not available directly. Instead:
+
+| Tool | Command | Description |
+|------|---------|-------------|
+| **Playwright Inspector** | `yarn cucumber:debug -p smoke` | Step-through debugger with DOM picker (like Cypress) |
+| **Playwright Inspector (Docker)** | `yarn cucumber:docker:debug -p smoke` | Same, but against the Docker container |
+| **Trace Viewer** | `yarn trace:show ./path/to/trace.zip` | Timeline of actions, screenshots, network, DOM snapshots |
+| **Headed mode** | Already enabled (`HEADLESS=false` in `env/common.env`) | Browsers open visually |
+| **Headless mode** | `HEADLESS=true yarn cucumber:localhost -p smoke` | Run without opening browsers |
+
 ### Performance Tests (k6)
+
 ```bash
 cd performance
 k6 run scripts/smoke-test.js
 k6 run scripts/load-test.js
 k6 run scripts/stress-test.js
+```
+
+### Docker Compose Cleanup
+
+```bash
+docker compose down              # stop containers
+docker compose down --rmi local  # stop + remove built images
+docker compose down -v           # stop + remove volumes
 ```
 
 ## Infrastructure
@@ -209,7 +300,7 @@ See [reportportal/README.md](./reportportal/README.md) for full setup guide.
 
 - **Frontend**: React 17, Material-UI, Bootstrap
 - **Backend**: Express.js, PostgreSQL
-- **Testing**: Playwright, Cucumber, k6
+- **Testing**: Playwright 1.59, Cucumber 8, k6
 - **Infrastructure**: Terraform, Packer, Docker
 - **Orchestration**: Kubernetes, Helm, ArgoCD
 - **CI/CD**: GitLab CI (with security scanning)
