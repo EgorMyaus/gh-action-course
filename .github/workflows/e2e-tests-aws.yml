@@ -1,0 +1,180 @@
+name: E2E Tests on AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS Region"
+        required: true
+        default: "us-east-1"
+        type: choice
+        options:
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+
+env:
+  AWS_REGION: ${{ github.event.inputs.aws_region || 'us-east-1' }}
+  TF_DIR: infra/environments/dev-ephemeral
+  TF_VAR_aws_region: ${{ github.event.inputs.aws_region || 'us-east-1' }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-test-destroy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # =====================================================================
+      # CHECKOUT & SETUP
+      # =====================================================================
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+          terraform_wrapper: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      # =====================================================================
+      # TERRAFORM — Deploy Infrastructure
+      # =====================================================================
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -auto-approve
+
+      - name: Get Terraform outputs
+        id: tf
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "app_url=$(terraform output -raw app_url)" >> "$GITHUB_OUTPUT"
+          echo "ecr_repo=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
+          echo "ecs_cluster=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "ecs_service=$(terraform output -raw ecs_service_name)" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # DOCKER — Build & Push Image to ECR
+      # =====================================================================
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ steps.tf.outputs.ecr_repo }}:latest .
+          docker push ${{ steps.tf.outputs.ecr_repo }}:latest
+
+      # =====================================================================
+      # ECS — Deploy & Wait for Healthy
+      # =====================================================================
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service \
+            --cluster ${{ steps.tf.outputs.ecs_cluster }} \
+            --service ${{ steps.tf.outputs.ecs_service }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for ECS service to stabilize
+        run: |
+          echo "Waiting for ECS service to reach steady state..."
+          aws ecs wait services-stable \
+            --cluster ${{ steps.tf.outputs.ecs_cluster }} \
+            --services ${{ steps.tf.outputs.ecs_service }} \
+            --region ${{ env.AWS_REGION }}
+          echo "ECS service is stable!"
+
+      - name: Wait for app to respond
+        run: |
+          APP_URL="${{ steps.tf.outputs.app_url }}"
+          echo "Waiting for $APP_URL to respond..."
+          for i in $(seq 1 30); do
+            if curl -sf "$APP_URL" > /dev/null 2>&1; then
+              echo "App is responding!"
+              exit 0
+            fi
+            echo "Attempt $i/30 - waiting 10s..."
+            sleep 10
+          done
+          echo "App did not respond in time!"
+          exit 1
+
+      # =====================================================================
+      # E2E TESTS — Run Against AWS
+      # =====================================================================
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: yarn install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate hosts config for AWS
+        working-directory: e2e
+        run: |
+          cat > config/hosts.aws.json << EOF
+          {
+            "localhost": "${{ steps.tf.outputs.app_url }}/",
+            "production": "https://hub.testingtalks.com.au/",
+            "api": "https://jsonplaceholder.typicode.com/"
+          }
+          EOF
+          echo "Generated hosts.aws.json:"
+          cat config/hosts.aws.json
+
+      - name: Run smoke tests against AWS
+        working-directory: e2e
+        env:
+          NODE_ENV: localhost
+          COMMON_CONFIG_FILE: env/common.env
+          HEADLESS: "true"
+          HOSTS_URLS_PATH: /config/hosts.aws.json
+        run: |
+          yarn precucumber
+          yarn transpile
+          npx cucumber-js -p smoke
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-reports-aws
+          path: e2e/reports/
+          retention-days: 14
+
+      # =====================================================================
+      # TERRAFORM — Destroy Infrastructure (ALWAYS)
+      # =====================================================================
+      - name: Terraform Destroy
+        if: always()
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform destroy -auto-approve
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## E2E Tests on AWS Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **App URL:** ${{ steps.tf.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Infrastructure:** Destroyed ✅" >> $GITHUB_STEP_SUMMARY

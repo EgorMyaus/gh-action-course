@@ -28,6 +28,7 @@ e2e/dist/
 e2e/reports/
 
 # Terraform
-infra/.terraform/
-infra/*.tfstate
-infra/*.tfstate.backup
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
