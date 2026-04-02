@@ -79,18 +79,8 @@ jobs:
           echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # DOCKER — Build image locally, save & copy to EC2
+      # DOCKER — Build & run image on EC2 via SSM
       # =====================================================================
-      - name: Build Docker image
-        run: |
-          docker build -t react-app:${{ env.IMAGE_TAG }} -t react-app:latest .
-          echo "Image built: react-app:${{ env.IMAGE_TAG }}"
-
-      - name: Save Docker image as tarball
-        run: |
-          docker save react-app:latest | gzip > /tmp/react-app.tar.gz
-          ls -lh /tmp/react-app.tar.gz
-
       - name: Wait for EC2 instance to be ready
         run: |
           INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
@@ -100,44 +90,50 @@ jobs:
             --region ${{ env.AWS_REGION }}
           echo "Instance is ready!"
 
-      - name: Copy image and start container on EC2
+      - name: Build and run Docker image on EC2
         run: |
           INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
-          INSTANCE_IP="${{ steps.tf.outputs.instance_ip }}"
+          REPO_URL="https://github.com/${{ github.repository }}.git"
+          COMMIT_SHA="${{ github.sha }}"
 
-          # Use SSM to copy the image and run it (no SSH key needed)
-          # First, upload tarball to S3 (temporary)
-          BUCKET="playwright-react-app-deploy-${GITHUB_RUN_ID}"
-          aws s3 mb "s3://${BUCKET}" --region ${{ env.AWS_REGION }} || true
-          aws s3 cp /tmp/react-app.tar.gz "s3://${BUCKET}/react-app.tar.gz"
-
-          # Run commands on EC2 via SSM
-          aws ssm send-command \
+          # Clone repo, build Docker image, and run container on EC2
+          CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
+            --timeout-seconds 600 \
             --parameters "commands=[
-              'aws s3 cp s3://${BUCKET}/react-app.tar.gz /tmp/react-app.tar.gz --region ${{ env.AWS_REGION }}',
-              'gunzip -c /tmp/react-app.tar.gz | docker load',
+              'set -e',
+              'yum install -y git docker 2>/dev/null || true',
+              'systemctl start docker',
+              'cd /tmp',
+              'git clone ${REPO_URL} app',
+              'cd app',
+              'git checkout ${COMMIT_SHA}',
+              'docker build -t react-app:${COMMIT_SHA} -t react-app:latest .',
               'docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest',
-              'rm -f /tmp/react-app.tar.gz'
+              'echo DEPLOY_SUCCESS'
             ]" \
             --region ${{ env.AWS_REGION }} \
             --output text \
-            --query "Command.CommandId" > /tmp/cmd_id.txt
+            --query "Command.CommandId")
 
-          CMD_ID=$(cat /tmp/cmd_id.txt)
           echo "SSM Command ID: $CMD_ID"
 
           # Wait for command to complete
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" \
               --instance-id "$INSTANCE_ID" \
               --region ${{ env.AWS_REGION }} \
               --query "Status" --output text 2>/dev/null || echo "Pending")
-            echo "Attempt $i/30 — SSM status: $STATUS"
+            echo "Attempt $i/60 — SSM status: $STATUS"
             if [ "$STATUS" = "Success" ]; then
               echo "Container deployed successfully!"
+              aws ssm get-command-invocation \
+                --command-id "$CMD_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --region ${{ env.AWS_REGION }} \
+                --query "StandardOutputContent" --output text | tail -5
               break
             elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
               echo "SSM command failed!"
@@ -150,9 +146,6 @@ jobs:
             fi
             sleep 10
           done
-
-          # Cleanup S3 bucket
-          aws s3 rb "s3://${BUCKET}" --force --region ${{ env.AWS_REGION }} || true
 
       - name: Wait for app to respond
         run: |
@@ -256,14 +249,6 @@ jobs:
             echo "No orphaned instances found."
           fi
 
-      - name: Cleanup orphaned S3 deploy buckets
-        run: |
-          for bucket in $(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'playwright-react-app-deploy-')].Name" --output text); do
-            echo "Removing orphaned bucket: $bucket"
-            aws s3 rb "s3://$bucket" --force || true
-          done
-        continue-on-error: true
-
       - name: Cost guard check
         run: |
           echo "## Running instances check:" >> $GITHUB_STEP_SUMMARY
@@ -282,5 +267,5 @@ jobs:
           echo "- **Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Image Tag:** ${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Architecture:** EC2 t2.micro (Free Tier)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Architecture:** EC2 t3.micro (Free Tier)" >> $GITHUB_STEP_SUMMARY
           echo "- **Cleanup:** Completed" >> $GITHUB_STEP_SUMMARY

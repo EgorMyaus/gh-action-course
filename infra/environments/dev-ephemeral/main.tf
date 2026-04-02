@@ -183,11 +183,6 @@ resource "aws_iam_role_policy_attachment" "ec2_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_role_policy_attachment" "ec2_s3_read" {
-  role       = aws_iam_role.ec2.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
-}
-
 resource "aws_iam_instance_profile" "ec2" {
   name = "${local.name_prefix}-ec2-profile"
   role = aws_iam_role.ec2.name
