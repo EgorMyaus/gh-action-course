@@ -20,14 +20,3 @@ variable "instance_type" {
   default     = "t3.micro"
 }
 
-variable "repo_url" {
-  description = "Git repository URL to clone and build on EC2"
-  type        = string
-  default     = ""
-}
-
-variable "commit_sha" {
-  description = "Git commit SHA to checkout and build"
-  type        = string
-  default     = "main"
-}

@@ -179,24 +179,14 @@ resource "aws_instance" "app" {
 exec > /var/log/user-data.log 2>&1
 set -ex
 
-# Install Docker and Git
+# Install Docker
 yum update -y
-yum install -y docker git
+yum install -y docker
 systemctl start docker
 systemctl enable docker
 
-# Clone repo and build Docker image
-cd /tmp
-git clone ${var.repo_url} app
-cd app
-git checkout ${var.commit_sha}
-docker build -t react-app:${var.commit_sha} -t react-app:latest .
-
-# Run container
-docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest
-
-# Signal success
-touch /tmp/deploy-ready
+# Signal that Docker is ready
+touch /tmp/docker-ready
 EOF
 
   user_data_replace_on_change = true

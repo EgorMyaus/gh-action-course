@@ -19,8 +19,6 @@ env:
   AWS_REGION: ${{ github.event.inputs.aws_region || 'us-east-1' }}
   TF_DIR: infra/environments/dev-ephemeral
   TF_VAR_aws_region: ${{ github.event.inputs.aws_region || 'us-east-1' }}
-  TF_VAR_repo_url: https://github.com/${{ github.repository }}.git
-  TF_VAR_commit_sha: ${{ github.sha }}
   IMAGE_TAG: ${{ github.sha }}
 
 permissions:
@@ -81,22 +79,78 @@ jobs:
           echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # WAIT — EC2 user_data does git clone + docker build + docker run
+      # DOCKER — Build on runner, transfer to EC2 via SCP
       # =====================================================================
+      - name: Build Docker image
+        run: |
+          docker build -t react-app:${{ env.IMAGE_TAG }} -t react-app:latest .
+          docker save react-app:latest | gzip > /tmp/react-app.tar.gz
+          ls -lh /tmp/react-app.tar.gz
+
+      - name: Wait for EC2 to be ready
+        run: |
+          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
+          echo "Waiting for instance $INSTANCE_ID to pass status checks..."
+          aws ec2 wait instance-status-ok \
+            --instance-ids "$INSTANCE_ID" \
+            --region ${{ env.AWS_REGION }}
+          echo "Instance is ready!"
+
+      - name: Transfer image and start container on EC2
+        run: |
+          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
+          INSTANCE_IP="${{ steps.tf.outputs.instance_ip }}"
+          AZ=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].Placement.AvailabilityZone" \
+            --output text --region ${{ env.AWS_REGION }})
+
+          # Generate temporary SSH key
+          ssh-keygen -t ed25519 -f /tmp/ec2_key -N "" -q
+
+          # Push public key via EC2 Instance Connect (valid for 60s)
+          aws ec2-instance-connect send-ssh-public-key \
+            --instance-id "$INSTANCE_ID" \
+            --instance-os-user ec2-user \
+            --ssh-public-key file:///tmp/ec2_key.pub \
+            --availability-zone "$AZ" \
+            --region ${{ env.AWS_REGION }}
+
+          SSH_OPTS="-i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+
+          # SCP the image tarball to EC2
+          scp $SSH_OPTS /tmp/react-app.tar.gz ec2-user@${INSTANCE_IP}:/tmp/
+
+          # Re-push key (may have expired) then SSH to load + run
+          aws ec2-instance-connect send-ssh-public-key \
+            --instance-id "$INSTANCE_ID" \
+            --instance-os-user ec2-user \
+            --ssh-public-key file:///tmp/ec2_key.pub \
+            --availability-zone "$AZ" \
+            --region ${{ env.AWS_REGION }}
+
+          ssh $SSH_OPTS ec2-user@${INSTANCE_IP} << 'ENDSSH'
+            sudo docker load < /tmp/react-app.tar.gz
+            sudo docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest
+            sudo docker ps
+          ENDSSH
+
+          # Clean up key
+          rm -f /tmp/ec2_key /tmp/ec2_key.pub
+
       - name: Wait for app to respond
         run: |
           APP_URL="${{ steps.tf.outputs.app_url }}"
-          echo "EC2 user_data is building and starting the app..."
           echo "Waiting for $APP_URL to respond..."
-          for i in $(seq 1 60); do
+          for i in $(seq 1 30); do
             if curl -sf "$APP_URL" > /dev/null 2>&1; then
               echo "App is responding after attempt $i!"
               exit 0
             fi
-            echo "Attempt $i/60 - waiting 10s..."
-            sleep 10
+            echo "Attempt $i/30 - waiting 5s..."
+            sleep 5
           done
-          echo "App did not respond in 10 minutes!"
+          echo "App did not respond in time!"
           exit 1
 
       # =====================================================================
