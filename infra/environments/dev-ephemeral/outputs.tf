@@ -1,23 +1,18 @@
 # =============================================================================
-# OUTPUTS — Ephemeral Dev Environment
+# OUTPUTS — Ephemeral Dev Environment (EC2 Free Tier)
 # =============================================================================
 
 output "app_url" {
-  description = "URL of the React application (ALB DNS)"
-  value       = "http://${aws_lb.main.dns_name}"
+  description = "URL of the React application (EC2 public IP)"
+  value       = "http://${aws_instance.app.public_ip}"
 }
 
-output "ecr_repository_url" {
-  description = "ECR repository URL for pushing Docker images"
-  value       = aws_ecr_repository.app.repository_url
+output "instance_id" {
+  description = "EC2 instance ID"
+  value       = aws_instance.app.id
 }
 
-output "ecs_cluster_name" {
-  description = "ECS cluster name"
-  value       = aws_ecs_cluster.main.name
-}
-
-output "ecs_service_name" {
-  description = "ECS service name"
-  value       = aws_ecs_service.app.name
+output "instance_public_ip" {
+  description = "EC2 instance public IP"
+  value       = aws_instance.app.public_ip
 }

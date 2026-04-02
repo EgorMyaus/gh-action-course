@@ -1,13 +1,14 @@
 # =============================================================================
-# EPHEMERAL DEV ENVIRONMENT — ECS Fargate
+# EPHEMERAL DEV ENVIRONMENT — EC2 + Docker (Free Tier)
 # =============================================================================
-# Spins up a lightweight environment for E2E testing on AWS.
+# Spins up a single t2.micro EC2 instance with Docker for E2E testing.
 # Designed to be created and destroyed per CI run.
+# Cost: $0 (within AWS Free Tier — 750 hours/month t2.micro)
 #
 # Usage:
 #   terraform init
 #   terraform apply -auto-approve
-#   # ... run tests against the ALB URL ...
+#   # ... run tests against the EC2 public IP ...
 #   terraform destroy -auto-approve
 # =============================================================================
 
@@ -30,6 +31,8 @@ provider "aws" {
       Environment = "dev-ephemeral"
       ManagedBy   = "Terraform"
       Project     = var.project_name
+      TTL         = "1h"
+      Owner       = "github-actions"
     }
   }
 }
@@ -40,6 +43,8 @@ locals {
     Environment = "dev-ephemeral"
     ManagedBy   = "Terraform"
     Project     = var.project_name
+    TTL         = "1h"
+    Owner       = "github-actions"
   }
 }
 
@@ -51,8 +56,23 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 # =============================================================================
-# NETWORKING — VPC, Subnets, IGW
+# NETWORKING — VPC, Subnet, IGW (minimal)
 # =============================================================================
 
 resource "aws_vpc" "main" {
@@ -66,15 +86,13 @@ resource "aws_vpc" "main" {
 }
 
 resource "aws_subnet" "public" {
-  count = 2
-
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index)
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
 
   tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-public-${count.index + 1}"
+    Name = "${local.name_prefix}-public"
   })
 }
 
@@ -100,19 +118,17 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_route_table_association" "public" {
-  count = 2
-
-  subnet_id      = aws_subnet.public[count.index].id
+  subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
 
 # =============================================================================
-# SECURITY GROUPS
+# SECURITY GROUP — HTTP + SSH
 # =============================================================================
 
-resource "aws_security_group" "alb" {
-  name_prefix = "${local.name_prefix}-alb-"
-  description = "ALB security group"
+resource "aws_security_group" "app" {
+  name_prefix = "${local.name_prefix}-app-"
+  description = "Allow HTTP and SSH for ephemeral dev environment"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -131,36 +147,7 @@ resource "aws_security_group" "alb" {
   }
 
   tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-alb-sg"
-  })
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_security_group" "ecs" {
-  name_prefix = "${local.name_prefix}-ecs-"
-  description = "ECS tasks security group"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description     = "HTTP from ALB"
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-ecs-sg"
+    Name = "${local.name_prefix}-app-sg"
   })
 
   lifecycle {
@@ -169,48 +156,11 @@ resource "aws_security_group" "ecs" {
 }
 
 # =============================================================================
-# ECR REPOSITORY
+# IAM — EC2 Instance Profile (SSM + S3 access)
 # =============================================================================
 
-resource "aws_ecr_repository" "app" {
-  name                 = "${local.name_prefix}-app"
-  image_tag_mutability = "MUTABLE"
-  force_delete         = true
-
-  tags = local.common_tags
-}
-
-# =============================================================================
-# ECS CLUSTER
-# =============================================================================
-
-resource "aws_ecs_cluster" "main" {
-  name = "${local.name_prefix}-cluster"
-
-  setting {
-    name  = "containerInsights"
-    value = "disabled"
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_ecs_cluster_capacity_providers" "main" {
-  cluster_name       = aws_ecs_cluster.main.name
-  capacity_providers = ["FARGATE"]
-
-  default_capacity_provider_strategy {
-    capacity_provider = "FARGATE"
-    weight            = 1
-  }
-}
-
-# =============================================================================
-# IAM — ECS Task Execution Role
-# =============================================================================
-
-resource "aws_iam_role" "ecs_execution" {
-  name = "${local.name_prefix}-ecs-execution"
+resource "aws_iam_role" "ec2" {
+  name = "${local.name_prefix}-ec2-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -219,7 +169,7 @@ resource "aws_iam_role" "ecs_execution" {
         Action = "sts:AssumeRole"
         Effect = "Allow"
         Principal = {
-          Service = "ecs-tasks.amazonaws.com"
+          Service = "ec2.amazonaws.com"
         }
       }
     ]
@@ -228,154 +178,62 @@ resource "aws_iam_role" "ecs_execution" {
   tags = local.common_tags
 }
 
-resource "aws_iam_role_policy_attachment" "ecs_execution" {
-  role       = aws_iam_role.ecs_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+resource "aws_iam_role_policy_attachment" "ec2_ssm" {
+  role       = aws_iam_role.ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_role_policy_attachment" "ecs_ecr_read" {
-  role       = aws_iam_role.ecs_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+resource "aws_iam_role_policy_attachment" "ec2_s3_read" {
+  role       = aws_iam_role.ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
 }
 
-# =============================================================================
-# ECS TASK DEFINITION
-# =============================================================================
-
-resource "aws_ecs_task_definition" "app" {
-  family                   = "${local.name_prefix}-app"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = 256
-  memory                   = 512
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "react-app"
-      image     = "${aws_ecr_repository.app.repository_url}:latest"
-      essential = true
-      portMappings = [
-        {
-          containerPort = 80
-          protocol      = "tcp"
-        }
-      ]
-      environment = [
-        {
-          name  = "REACT_APP_USE_LOCAL_DATA"
-          value = "true"
-        }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.app.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "ecs"
-        }
-      }
-      healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost/ || exit 1"]
-        interval    = 15
-        timeout     = 5
-        retries     = 3
-        startPeriod = 10
-      }
-    }
-  ])
+resource "aws_iam_instance_profile" "ec2" {
+  name = "${local.name_prefix}-ec2-profile"
+  role = aws_iam_role.ec2.name
 
   tags = local.common_tags
 }
 
 # =============================================================================
-# CLOUDWATCH LOG GROUP
+# EC2 INSTANCE — t2.micro (Free Tier) + Docker
 # =============================================================================
 
-resource "aws_cloudwatch_log_group" "app" {
-  name              = "/ecs/${local.name_prefix}-app"
-  retention_in_days = 1
+resource "aws_instance" "app" {
+  ami                         = data.aws_ami.amazon_linux.id
+  instance_type               = var.instance_type
+  subnet_id                   = aws_subnet.public.id
+  vpc_security_group_ids      = [aws_security_group.app.id]
+  associate_public_ip_address = true
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
 
-  tags = local.common_tags
-}
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e
 
-# =============================================================================
-# APPLICATION LOAD BALANCER
-# =============================================================================
+    # Install Docker and AWS CLI
+    yum update -y
+    yum install -y docker aws-cli
+    systemctl start docker
+    systemctl enable docker
 
-resource "aws_lb" "main" {
-  name               = "${local.name_prefix}-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
+    # Signal that Docker is ready
+    touch /tmp/docker-ready
+  EOF
 
-  tags = local.common_tags
-}
+  user_data_replace_on_change = true
 
-resource "aws_lb_target_group" "app" {
-  name        = "${local.name_prefix}-tg"
-  port        = 80
-  protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "ip"
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    interval            = 15
-    matcher             = "200"
-    path                = "/"
-    port                = "traffic-port"
-    timeout             = 5
-    unhealthy_threshold = 3
-  }
-
-  tags = local.common_tags
-}
-
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
-  }
-
-  tags = local.common_tags
-}
-
-# =============================================================================
-# ECS SERVICE
-# =============================================================================
-
-resource "aws_ecs_service" "app" {
-  name            = "${local.name_prefix}-service"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.app.arn
-    container_name   = "react-app"
-    container_port   = 80
+  root_block_device {
+    volume_size = 20
+    volume_type = "gp3"
   }
 
   depends_on = [
-    aws_lb_listener.http,
-    aws_iam_role_policy_attachment.ecs_execution,
-    aws_iam_role_policy_attachment.ecs_ecr_read,
-    aws_ecs_cluster_capacity_providers.main,
+    aws_iam_instance_profile.ec2,
+    aws_internet_gateway.main,
   ]
 
-  tags = local.common_tags
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-app"
+  })
 }

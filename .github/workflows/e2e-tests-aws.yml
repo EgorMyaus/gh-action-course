@@ -19,20 +19,25 @@ env:
   AWS_REGION: ${{ github.event.inputs.aws_region || 'us-east-1' }}
   TF_DIR: infra/environments/dev-ephemeral
   TF_VAR_aws_region: ${{ github.event.inputs.aws_region || 'us-east-1' }}
+  IMAGE_TAG: ${{ github.sha }}
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  deploy-test-destroy:
+  # =====================================================================
+  # JOB 1: Deploy EC2, build image, copy to EC2, run tests
+  # =====================================================================
+  deploy-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    outputs:
+      app_url: ${{ steps.tf.outputs.app_url }}
+      instance_id: ${{ steps.tf.outputs.instance_id }}
+      instance_ip: ${{ steps.tf.outputs.instance_ip }}
 
     steps:
-      # =====================================================================
-      # CHECKOUT & SETUP
-      # =====================================================================
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -52,58 +57,102 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "20"
 
       # =====================================================================
-      # TERRAFORM — Deploy Infrastructure
+      # TERRAFORM — Deploy EC2 Infrastructure
       # =====================================================================
       - name: Terraform Init
         working-directory: ${{ env.TF_DIR }}
-        run: terraform init
+        run: terraform init -lock-timeout=5m
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve -lock-timeout=5m
 
       - name: Get Terraform outputs
         id: tf
         working-directory: ${{ env.TF_DIR }}
         run: |
           echo "app_url=$(terraform output -raw app_url)" >> "$GITHUB_OUTPUT"
-          echo "ecr_repo=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
-          echo "ecs_cluster=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
-          echo "ecs_service=$(terraform output -raw ecs_service_name)" >> "$GITHUB_OUTPUT"
+          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # DOCKER — Build & Push Image to ECR
+      # DOCKER — Build image locally, save & copy to EC2
       # =====================================================================
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push Docker image
+      - name: Build Docker image
         run: |
-          docker build -t ${{ steps.tf.outputs.ecr_repo }}:latest .
-          docker push ${{ steps.tf.outputs.ecr_repo }}:latest
+          docker build -t react-app:${{ env.IMAGE_TAG }} -t react-app:latest .
+          echo "Image built: react-app:${{ env.IMAGE_TAG }}"
 
-      # =====================================================================
-      # ECS — Deploy & Wait for Healthy
-      # =====================================================================
-      - name: Force new ECS deployment
+      - name: Save Docker image as tarball
         run: |
-          aws ecs update-service \
-            --cluster ${{ steps.tf.outputs.ecs_cluster }} \
-            --service ${{ steps.tf.outputs.ecs_service }} \
-            --force-new-deployment \
+          docker save react-app:latest | gzip > /tmp/react-app.tar.gz
+          ls -lh /tmp/react-app.tar.gz
+
+      - name: Wait for EC2 instance to be ready
+        run: |
+          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
+          echo "Waiting for instance $INSTANCE_ID status checks..."
+          aws ec2 wait instance-status-ok \
+            --instance-ids "$INSTANCE_ID" \
             --region ${{ env.AWS_REGION }}
+          echo "Instance is ready!"
 
-      - name: Wait for ECS service to stabilize
+      - name: Copy image and start container on EC2
         run: |
-          echo "Waiting for ECS service to reach steady state..."
-          aws ecs wait services-stable \
-            --cluster ${{ steps.tf.outputs.ecs_cluster }} \
-            --services ${{ steps.tf.outputs.ecs_service }} \
-            --region ${{ env.AWS_REGION }}
-          echo "ECS service is stable!"
+          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
+          INSTANCE_IP="${{ steps.tf.outputs.instance_ip }}"
+
+          # Use SSM to copy the image and run it (no SSH key needed)
+          # First, upload tarball to S3 (temporary)
+          BUCKET="playwright-react-app-deploy-${GITHUB_RUN_ID}"
+          aws s3 mb "s3://${BUCKET}" --region ${{ env.AWS_REGION }} || true
+          aws s3 cp /tmp/react-app.tar.gz "s3://${BUCKET}/react-app.tar.gz"
+
+          # Run commands on EC2 via SSM
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              'aws s3 cp s3://${BUCKET}/react-app.tar.gz /tmp/react-app.tar.gz --region ${{ env.AWS_REGION }}',
+              'gunzip -c /tmp/react-app.tar.gz | docker load',
+              'docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest',
+              'rm -f /tmp/react-app.tar.gz'
+            ]" \
+            --region ${{ env.AWS_REGION }} \
+            --output text \
+            --query "Command.CommandId" > /tmp/cmd_id.txt
+
+          CMD_ID=$(cat /tmp/cmd_id.txt)
+          echo "SSM Command ID: $CMD_ID"
+
+          # Wait for command to complete
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --region ${{ env.AWS_REGION }} \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "Attempt $i/30 — SSM status: $STATUS"
+            if [ "$STATUS" = "Success" ]; then
+              echo "Container deployed successfully!"
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "SSM command failed!"
+              aws ssm get-command-invocation \
+                --command-id "$CMD_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --region ${{ env.AWS_REGION }} \
+                --query "StandardErrorContent" --output text
+              exit 1
+            fi
+            sleep 10
+          done
+
+          # Cleanup S3 bucket
+          aws s3 rb "s3://${BUCKET}" --force --region ${{ env.AWS_REGION }} || true
 
       - name: Wait for app to respond
         run: |
@@ -121,7 +170,7 @@ jobs:
           exit 1
 
       # =====================================================================
-      # E2E TESTS — Run Against AWS
+      # E2E TESTS — Run Against AWS EC2
       # =====================================================================
       - name: Install e2e dependencies
         working-directory: e2e
@@ -165,12 +214,65 @@ jobs:
           retention-days: 14
 
       # =====================================================================
-      # TERRAFORM — Destroy Infrastructure (ALWAYS)
+      # IN-JOB DESTROY (first attempt)
       # =====================================================================
       - name: Terraform Destroy
         if: always()
         working-directory: ${{ env.TF_DIR }}
-        run: terraform destroy -auto-approve
+        run: terraform destroy -auto-approve -lock-timeout=5m
+
+  # =====================================================================
+  # JOB 2: Dedicated Cleanup (runs even if deploy-and-test fails/cancels)
+  # =====================================================================
+  cleanup:
+    needs: deploy-and-test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Force-terminate any orphaned EC2 instances
+        run: |
+          echo "Checking for orphaned instances..."
+          INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=playwright-react-app" \
+                      "Name=tag:Environment,Values=dev-ephemeral" \
+                      "Name=instance-state-name,Values=running,pending,stopped" \
+            --query "Reservations[].Instances[].InstanceId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          if [ -n "$INSTANCES" ] && [ "$INSTANCES" != "None" ]; then
+            echo "Terminating orphaned instances: $INSTANCES"
+            aws ec2 terminate-instances --instance-ids $INSTANCES --region ${{ env.AWS_REGION }}
+          else
+            echo "No orphaned instances found."
+          fi
+
+      - name: Cleanup orphaned S3 deploy buckets
+        run: |
+          for bucket in $(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'playwright-react-app-deploy-')].Name" --output text); do
+            echo "Removing orphaned bucket: $bucket"
+            aws s3 rb "s3://$bucket" --force || true
+          done
+        continue-on-error: true
+
+      - name: Cost guard check
+        run: |
+          echo "## Running instances check:" >> $GITHUB_STEP_SUMMARY
+          aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=playwright-react-app" \
+                      "Name=instance-state-name,Values=running,pending" \
+            --query "Reservations[].Instances[].[InstanceId,State.Name,LaunchTime]" \
+            --output table \
+            --region ${{ env.AWS_REGION }} >> $GITHUB_STEP_SUMMARY || true
 
       - name: Summary
         if: always()
@@ -178,5 +280,7 @@ jobs:
           echo "## E2E Tests on AWS Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **App URL:** ${{ steps.tf.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Infrastructure:** Destroyed ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag:** ${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Architecture:** EC2 t2.micro (Free Tier)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cleanup:** Completed" >> $GITHUB_STEP_SUMMARY

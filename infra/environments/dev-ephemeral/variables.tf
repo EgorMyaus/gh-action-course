@@ -1,5 +1,5 @@
 # =============================================================================
-# VARIABLES — Ephemeral Dev Environment
+# VARIABLES — Ephemeral Dev Environment (EC2 Free Tier)
 # =============================================================================
 
 variable "project_name" {
@@ -12,4 +12,10 @@ variable "aws_region" {
   description = "AWS region for all resources"
   type        = string
   default     = "us-east-1"
+}
+
+variable "instance_type" {
+  description = "EC2 instance type (t2.micro = Free Tier eligible)"
+  type        = string
+  default     = "t2.micro"
 }
