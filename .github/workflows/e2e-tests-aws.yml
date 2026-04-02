@@ -181,7 +181,7 @@ jobs:
           echo "Generated hosts.aws.json:"
           cat config/hosts.aws.json
 
-      - name: Run smoke tests against AWS
+      - name: Run E2E tests against AWS
         working-directory: e2e
         env:
           NODE_ENV: localhost
@@ -189,9 +189,15 @@ jobs:
           HEADLESS: "true"
           HOSTS_URLS_PATH: /config/hosts.aws.json
         run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            PROFILE="regression"
+          else
+            PROFILE="smoke"
+          fi
+          echo "Running profile: $PROFILE"
           yarn precucumber
           yarn transpile
-          npx cucumber-js -p smoke
+          npx cucumber-js -p $PROFILE
 
       - name: Upload test reports
         if: always()
