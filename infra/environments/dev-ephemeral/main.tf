@@ -187,7 +187,22 @@ resource "aws_ecr_repository" "app" {
 resource "aws_ecs_cluster" "main" {
   name = "${local.name_prefix}-cluster"
 
+  setting {
+    name  = "containerInsights"
+    value = "disabled"
+  }
+
   tags = local.common_tags
+}
+
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = ["FARGATE"]
+
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+  }
 }
 
 # =============================================================================
@@ -355,7 +370,12 @@ resource "aws_ecs_service" "app" {
     container_port   = 80
   }
 
-  depends_on = [aws_lb_listener.http]
+  depends_on = [
+    aws_lb_listener.http,
+    aws_iam_role_policy_attachment.ecs_execution,
+    aws_iam_role_policy_attachment.ecs_ecr_read,
+    aws_ecs_cluster_capacity_providers.main,
+  ]
 
   tags = local.common_tags
 }
