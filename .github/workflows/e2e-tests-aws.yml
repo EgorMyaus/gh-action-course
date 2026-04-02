@@ -19,6 +19,8 @@ env:
   AWS_REGION: ${{ github.event.inputs.aws_region || 'us-east-1' }}
   TF_DIR: infra/environments/dev-ephemeral
   TF_VAR_aws_region: ${{ github.event.inputs.aws_region || 'us-east-1' }}
+  TF_VAR_repo_url: https://github.com/${{ github.repository }}.git
+  TF_VAR_commit_sha: ${{ github.sha }}
   IMAGE_TAG: ${{ github.sha }}
 
 permissions:
@@ -79,87 +81,22 @@ jobs:
           echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # DOCKER — Build & run image on EC2 via SSM
+      # WAIT — EC2 user_data does git clone + docker build + docker run
       # =====================================================================
-      - name: Wait for EC2 instance to be ready
-        run: |
-          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
-          echo "Waiting for instance $INSTANCE_ID status checks..."
-          aws ec2 wait instance-status-ok \
-            --instance-ids "$INSTANCE_ID" \
-            --region ${{ env.AWS_REGION }}
-          echo "Instance is ready!"
-
-      - name: Build and run Docker image on EC2
-        run: |
-          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
-          REPO_URL="https://github.com/${{ github.repository }}.git"
-          COMMIT_SHA="${{ github.sha }}"
-
-          # Clone repo, build Docker image, and run container on EC2
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --timeout-seconds 600 \
-            --parameters "commands=[
-              'set -e',
-              'yum install -y git docker 2>/dev/null || true',
-              'systemctl start docker',
-              'cd /tmp',
-              'git clone ${REPO_URL} app',
-              'cd app',
-              'git checkout ${COMMIT_SHA}',
-              'docker build -t react-app:${COMMIT_SHA} -t react-app:latest .',
-              'docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest',
-              'echo DEPLOY_SUCCESS'
-            ]" \
-            --region ${{ env.AWS_REGION }} \
-            --output text \
-            --query "Command.CommandId")
-
-          echo "SSM Command ID: $CMD_ID"
-
-          # Wait for command to complete
-          for i in $(seq 1 60); do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --region ${{ env.AWS_REGION }} \
-              --query "Status" --output text 2>/dev/null || echo "Pending")
-            echo "Attempt $i/60 — SSM status: $STATUS"
-            if [ "$STATUS" = "Success" ]; then
-              echo "Container deployed successfully!"
-              aws ssm get-command-invocation \
-                --command-id "$CMD_ID" \
-                --instance-id "$INSTANCE_ID" \
-                --region ${{ env.AWS_REGION }} \
-                --query "StandardOutputContent" --output text | tail -5
-              break
-            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
-              echo "SSM command failed!"
-              aws ssm get-command-invocation \
-                --command-id "$CMD_ID" \
-                --instance-id "$INSTANCE_ID" \
-                --region ${{ env.AWS_REGION }} \
-                --query "StandardErrorContent" --output text
-              exit 1
-            fi
-            sleep 10
-          done
-
       - name: Wait for app to respond
         run: |
           APP_URL="${{ steps.tf.outputs.app_url }}"
+          echo "EC2 user_data is building and starting the app..."
           echo "Waiting for $APP_URL to respond..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             if curl -sf "$APP_URL" > /dev/null 2>&1; then
-              echo "App is responding!"
+              echo "App is responding after attempt $i!"
               exit 0
             fi
-            echo "Attempt $i/30 - waiting 10s..."
+            echo "Attempt $i/60 - waiting 10s..."
             sleep 10
           done
-          echo "App did not respond in time!"
+          echo "App did not respond in 10 minutes!"
           exit 1
 
       # =====================================================================

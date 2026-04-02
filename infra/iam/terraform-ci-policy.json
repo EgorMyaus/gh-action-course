@@ -33,15 +33,6 @@
       "Resource": "*"
     },
     {
-      "Sid": "SSM",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:SendCommand",
-        "ssm:GetCommandInvocation"
-      ],
-      "Resource": "*"
-    },
-    {
       "Sid": "STS",
       "Effect": "Allow",
       "Action": "sts:GetCallerIdentity",

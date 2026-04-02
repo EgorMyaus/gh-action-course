@@ -156,42 +156,7 @@ resource "aws_security_group" "app" {
 }
 
 # =============================================================================
-# IAM — EC2 Instance Profile (SSM + S3 access)
-# =============================================================================
-
-resource "aws_iam_role" "ec2" {
-  name = "${local.name_prefix}-ec2-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = local.common_tags
-}
-
-resource "aws_iam_role_policy_attachment" "ec2_ssm" {
-  role       = aws_iam_role.ec2.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_instance_profile" "ec2" {
-  name = "${local.name_prefix}-ec2-profile"
-  role = aws_iam_role.ec2.name
-
-  tags = local.common_tags
-}
-
-# =============================================================================
-# EC2 INSTANCE — t2.micro (Free Tier) + Docker
+# EC2 INSTANCE — t3.micro (Free Tier) + Docker
 # =============================================================================
 
 resource "aws_instance" "app" {
@@ -200,20 +165,29 @@ resource "aws_instance" "app" {
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.app.id]
   associate_public_ip_address = true
-  iam_instance_profile        = aws_iam_instance_profile.ec2.name
 
   user_data = <<-EOF
     #!/bin/bash
-    set -e
+    set -ex
 
-    # Install Docker and AWS CLI
+    # Install Docker and Git
     yum update -y
-    yum install -y docker aws-cli
+    yum install -y docker git
     systemctl start docker
     systemctl enable docker
 
-    # Signal that Docker is ready
-    touch /tmp/docker-ready
+    # Clone repo and build Docker image
+    cd /tmp
+    git clone ${var.repo_url} app
+    cd app
+    git checkout ${var.commit_sha}
+    docker build -t react-app:${var.commit_sha} -t react-app:latest .
+
+    # Run container
+    docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest
+
+    # Signal success
+    touch /tmp/deploy-ready
   EOF
 
   user_data_replace_on_change = true
@@ -224,7 +198,6 @@ resource "aws_instance" "app" {
   }
 
   depends_on = [
-    aws_iam_instance_profile.ec2,
     aws_internet_gateway.main,
   ]
 
