@@ -15,6 +15,10 @@ on:
           - us-west-2
           - eu-west-1
 
+concurrency:
+  group: e2e-aws-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   AWS_REGION: ${{ github.event.inputs.aws_region || 'us-east-1' }}
   TF_DIR: infra/environments/dev-ephemeral
