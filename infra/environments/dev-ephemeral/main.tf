@@ -139,6 +139,14 @@ resource "aws_security_group" "app" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "SSH for debugging"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -167,28 +175,29 @@ resource "aws_instance" "app" {
   associate_public_ip_address = true
 
   user_data = <<-EOF
-    #!/bin/bash
-    set -ex
+#!/bin/bash
+exec > /var/log/user-data.log 2>&1
+set -ex
 
-    # Install Docker and Git
-    yum update -y
-    yum install -y docker git
-    systemctl start docker
-    systemctl enable docker
+# Install Docker and Git
+yum update -y
+yum install -y docker git
+systemctl start docker
+systemctl enable docker
 
-    # Clone repo and build Docker image
-    cd /tmp
-    git clone ${var.repo_url} app
-    cd app
-    git checkout ${var.commit_sha}
-    docker build -t react-app:${var.commit_sha} -t react-app:latest .
+# Clone repo and build Docker image
+cd /tmp
+git clone ${var.repo_url} app
+cd app
+git checkout ${var.commit_sha}
+docker build -t react-app:${var.commit_sha} -t react-app:latest .
 
-    # Run container
-    docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest
+# Run container
+docker run -d --name react-app -p 80:80 --restart unless-stopped react-app:latest
 
-    # Signal success
-    touch /tmp/deploy-ready
-  EOF
+# Signal success
+touch /tmp/deploy-ready
+EOF
 
   user_data_replace_on_change = true
 
