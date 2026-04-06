@@ -30,7 +30,7 @@ terraform {
   #   6. Set GitHub secret or variable: TF_CLOUD_ORGANIZATION = "<your-org>"
   # ===========================================================================
   cloud {
-    organization = "PLACEHOLDER"  # overridden by TF_CLOUD_ORGANIZATION env var
+    # Organization is set via TF_CLOUD_ORGANIZATION env var in the workflow
 
     workspaces {
       name = "playwright-react-app-dev-ephemeral"
