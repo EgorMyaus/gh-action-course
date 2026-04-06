@@ -20,12 +20,13 @@ stages:
   - performance
   - deploy-production
 
-# Include GitLab security scanning templates
+# Include GitLab security scanning templates + GCP ephemeral E2E pipeline
 include:
   - template: Security/SAST.gitlab-ci.yml
   - template: Security/Dependency-Scanning.gitlab-ci.yml
   - template: Security/Secret-Detection.gitlab-ci.yml
   - template: Security/Container-Scanning.gitlab-ci.yml
+  - local: .gitlab/ci/e2e-tests-gcp.yml
 
 # =============================================================================
 # Variables
