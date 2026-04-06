@@ -15,6 +15,28 @@
 terraform {
   required_version = ">=1.7"
 
+  # ===========================================================================
+  # TERRAFORM CLOUD — Free Tier (Remote State + Locking)
+  # ===========================================================================
+  # Prerequisites:
+  #   1. Create a free Terraform Cloud account at https://app.terraform.io
+  #   2. Create an organization (or use an existing one)
+  #   3. Create a workspace named "playwright-react-app-dev-ephemeral"
+  #      → Settings > General > Execution Mode = "Local"
+  #        (runs on the GH runner, TF Cloud only stores state)
+  #   4. Generate a Team or User API token:
+  #      → Settings > Teams > API Token (or User Settings > Tokens)
+  #   5. Add the token as GitHub secret: TF_API_TOKEN
+  #   6. Set GitHub secret or variable: TF_CLOUD_ORGANIZATION = "<your-org>"
+  # ===========================================================================
+  cloud {
+    organization = "PLACEHOLDER"  # overridden by TF_CLOUD_ORGANIZATION env var
+
+    workspaces {
+      name = "playwright-react-app-dev-ephemeral"
+    }
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
