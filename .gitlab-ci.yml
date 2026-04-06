@@ -290,7 +290,8 @@ container_scanning:
   variables:
     CS_IMAGE: $DOCKER_IMAGE:$DOCKER_TAG
   needs:
-    - build-image
+    - job: build-image
+      optional: true
 
 secret_detection:
   stage: security
