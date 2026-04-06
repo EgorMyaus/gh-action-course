@@ -4,9 +4,9 @@ Feature: As a user I expect to be able to search a new contact
   @regression
   Scenario: As a user I can search for a contact that does not exist
     Given I am on the "home" page
-      And I fill in the "search" input with "Montgomery Burns"
+    And I fill in the "search" input with "Montgomery Burns"
     When the "contact" should not be displayed
-      And the "no items message" should contain the text "There are no items to display"
+    And the "no items message" should contain the text "There are no items to display"
 
   @smoke
   @regression
@@ -66,6 +66,7 @@ Feature: As a user I expect to be able to search a new contact
     And I fill in the "street" input with "742 Evergreen Terrace"
     And I fill in the "city" input with "Springfield"
     And I click the "save" button
+    And I am directed to the "home" page
 
     And I fill in the "search" input with "Homer Simpson"
     And the "contact" should be displayed

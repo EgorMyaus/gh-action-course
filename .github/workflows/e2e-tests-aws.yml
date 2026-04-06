@@ -1,0 +1,274 @@
+name: E2E Tests on AWS
+
+on:
+  push:
+    branches: [main, feature/**]
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS Region"
+        required: true
+        default: "us-east-1"
+        type: choice
+        options:
+          - us-east-1
+          - us-west-2
+          - eu-west-1
+
+concurrency:
+  group: e2e-aws-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ${{ github.event.inputs.aws_region || 'us-east-1' }}
+  TF_DIR: infra/environments/dev-ephemeral
+  TF_VAR_aws_region: ${{ github.event.inputs.aws_region || 'us-east-1' }}
+  TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+  TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+  DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/react-app
+  IMAGE_TAG: ${{ github.sha }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # =====================================================================
+  # JOB 1: Deploy EC2, build image, copy to EC2, run tests
+  # =====================================================================
+  deploy-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      app_url: ${{ steps.tf.outputs.app_url }}
+      instance_id: ${{ steps.tf.outputs.instance_id }}
+      instance_ip: ${{ steps.tf.outputs.instance_ip }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+          terraform_wrapper: false
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # =====================================================================
+      # TERRAFORM — Deploy EC2 Infrastructure
+      # =====================================================================
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -lock-timeout=5m
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -auto-approve -lock-timeout=5m
+
+      - name: Get Terraform outputs
+        id: tf
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "app_url=$(terraform output -raw app_url)" >> "$GITHUB_OUTPUT"
+          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # DOCKER — Build on runner, push to Docker Hub
+      # =====================================================================
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image to Docker Hub
+        run: |
+          docker build \
+            -t "${{ env.DOCKERHUB_IMAGE }}:${{ env.IMAGE_TAG }}" \
+            -t "${{ env.DOCKERHUB_IMAGE }}:latest" .
+          docker push "${{ env.DOCKERHUB_IMAGE }}:${{ env.IMAGE_TAG }}"
+          docker push "${{ env.DOCKERHUB_IMAGE }}:latest"
+
+      - name: Wait for EC2 to be ready
+        run: |
+          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
+          echo "Waiting for instance $INSTANCE_ID to pass status checks..."
+          aws ec2 wait instance-status-ok \
+            --instance-ids "$INSTANCE_ID" \
+            --region ${{ env.AWS_REGION }}
+          echo "Instance is ready!"
+
+      - name: Pull image and start container on EC2
+        run: |
+          INSTANCE_ID="${{ steps.tf.outputs.instance_id }}"
+          INSTANCE_IP="${{ steps.tf.outputs.instance_ip }}"
+          AZ=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].Placement.AvailabilityZone" \
+            --output text --region ${{ env.AWS_REGION }})
+
+          # Generate temporary SSH key
+          ssh-keygen -t ed25519 -f /tmp/ec2_key -N "" -q
+
+          # Push public key via EC2 Instance Connect (valid for 60s)
+          aws ec2-instance-connect send-ssh-public-key \
+            --instance-id "$INSTANCE_ID" \
+            --instance-os-user ec2-user \
+            --ssh-public-key file:///tmp/ec2_key.pub \
+            --availability-zone "$AZ" \
+            --region ${{ env.AWS_REGION }}
+
+          SSH_OPTS="-i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+
+          # SSH to EC2: pull public image from Docker Hub and run
+          ssh $SSH_OPTS ec2-user@${INSTANCE_IP} << ENDSSH
+            sudo docker pull ${{ env.DOCKERHUB_IMAGE }}:latest
+            sudo docker run -d --name react-app -p 80:80 --restart unless-stopped ${{ env.DOCKERHUB_IMAGE }}:latest
+            sudo docker ps
+          ENDSSH
+
+          # Clean up key
+          rm -f /tmp/ec2_key /tmp/ec2_key.pub
+
+      - name: Wait for app to respond
+        run: |
+          APP_URL="${{ steps.tf.outputs.app_url }}"
+          echo "Waiting for $APP_URL to respond..."
+          for i in $(seq 1 30); do
+            if curl -sf "$APP_URL" > /dev/null 2>&1; then
+              echo "App is responding after attempt $i!"
+              exit 0
+            fi
+            echo "Attempt $i/30 - waiting 5s..."
+            sleep 5
+          done
+          echo "App did not respond in time!"
+          exit 1
+
+      # =====================================================================
+      # E2E TESTS — Run Against AWS EC2
+      # =====================================================================
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: yarn install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate hosts config for AWS
+        working-directory: e2e
+        run: |
+          cat > config/hosts.aws.json << EOF
+          {
+            "localhost": "${{ steps.tf.outputs.app_url }}/",
+            "production": "https://hub.testingtalks.com.au/",
+            "api": "https://jsonplaceholder.typicode.com/"
+          }
+          EOF
+          echo "Generated hosts.aws.json:"
+          cat config/hosts.aws.json
+
+      - name: Run E2E tests against AWS
+        working-directory: e2e
+        env:
+          NODE_ENV: localhost
+          COMMON_CONFIG_FILE: env/common.env
+          HEADLESS: "true"
+          HOSTS_URLS_PATH: /config/hosts.aws.json
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            PROFILE="regression"
+          else
+            PROFILE="smoke"
+          fi
+          echo "Running profile: $PROFILE"
+          yarn precucumber
+          yarn transpile
+          npx cucumber-js -p $PROFILE
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-reports-aws
+          path: e2e/reports/
+          retention-days: 14
+
+      # =====================================================================
+      # IN-JOB DESTROY (first attempt)
+      # =====================================================================
+      - name: Terraform Destroy
+        if: always()
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform destroy -auto-approve -lock-timeout=5m
+
+  # =====================================================================
+  # JOB 2: Dedicated Cleanup (runs even if deploy-and-test fails/cancels)
+  # =====================================================================
+  cleanup:
+    needs: deploy-and-test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Force-terminate any orphaned EC2 instances
+        run: |
+          echo "Checking for orphaned instances..."
+          INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=playwright-react-app" \
+                      "Name=tag:Environment,Values=dev-ephemeral" \
+                      "Name=instance-state-name,Values=running,pending,stopped" \
+            --query "Reservations[].Instances[].InstanceId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          if [ -n "$INSTANCES" ] && [ "$INSTANCES" != "None" ]; then
+            echo "Terminating orphaned instances: $INSTANCES"
+            aws ec2 terminate-instances --instance-ids $INSTANCES --region ${{ env.AWS_REGION }}
+          else
+            echo "No orphaned instances found."
+          fi
+
+      - name: Cost guard check
+        run: |
+          echo "## Running instances check:" >> $GITHUB_STEP_SUMMARY
+          aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=playwright-react-app" \
+                      "Name=instance-state-name,Values=running,pending" \
+            --query "Reservations[].Instances[].[InstanceId,State.Name,LaunchTime]" \
+            --output table \
+            --region ${{ env.AWS_REGION }} >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## E2E Tests on AWS Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag:** ${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Architecture:** EC2 t3.micro (Free Tier)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cleanup:** Completed" >> $GITHUB_STEP_SUMMARY

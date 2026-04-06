@@ -1,20 +1,22 @@
-import {Before, After, setDefaultTimeout} from "@cucumber/cucumber"
+import { Before, After, setDefaultTimeout } from "@cucumber/cucumber"
 import { getViewPort } from '../../support/browser-behavior'
 import { ScenarioWorld } from './world'
 
 import { env, envNumber } from '../../env/parseEnv'
-import {logger} from "../../logger"
+import { logger } from "../../logger"
 
 setDefaultTimeout(envNumber('SCRIPT_TIMEOUT'))
 
 Before(async function (this: ScenarioWorld, scenario) {
-    logger.log(`Running cucumber scenario ${scenario.pickle.name}`)
+    logger.log(`\n${'='.repeat(60)}`)
+    logger.log(`▶ START: ${scenario.pickle.name}`)
+    logger.log(`${'='.repeat(60)}`)
 
     const contextOptions = {
         viewport: getViewPort(),
         ignoreHTTPSErrors: true,
         recordVideo: {
-            dir : `${env('VIDEO_PATH')}${scenario.pickle.name}`,
+            dir: `${env('VIDEO_PATH')}${scenario.pickle.name}`,
         }
     }
 
@@ -22,12 +24,16 @@ Before(async function (this: ScenarioWorld, scenario) {
     return ready
 })
 
-After(async function(this: ScenarioWorld, scenario) {
+After(async function (this: ScenarioWorld, scenario) {
     const {
         screen: { page, browser }
     } = this
 
     const scenarioStatus = scenario.result?.status
+
+    logger.log(`\n${'-'.repeat(60)}`)
+    logger.log(`${scenarioStatus === 'PASSED' ? '✅' : '❌'} END: ${scenario.pickle.name} [${scenarioStatus}]`)
+    logger.log(`${'-'.repeat(60)}`)
 
     if (scenarioStatus === 'FAILED') {
         const screenshot = await page.screenshot({

@@ -22,8 +22,9 @@ RUN yarn install --frozen-lockfile
 # Copy source code
 COPY public ./public
 COPY src ./src
-
-# Build the React app for production
+# Build the React app for production (REACT_APP_* vars are embedded at build time)
+ARG REACT_APP_USE_LOCAL_DATA=true
+ENV REACT_APP_USE_LOCAL_DATA=${REACT_APP_USE_LOCAL_DATA}
 RUN yarn build
 
 # =============================================================================
