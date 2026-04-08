@@ -201,11 +201,15 @@ resource "aws_instance" "app" {
 exec > /var/log/user-data.log 2>&1
 set -ex
 
-# Install Docker
-yum update -y
-yum install -y docker
+# Install Docker + EC2 Instance Connect helper
+# AL2023 minimal does NOT ship with ec2-instance-connect by default —
+# without this the send-ssh-public-key API succeeds but the key is
+# never written to authorized_keys, so SSH auth fails.
+dnf update -y
+dnf install -y docker ec2-instance-connect
 systemctl start docker
 systemctl enable docker
+systemctl enable --now ec2-instance-connect || true
 
 # Signal that Docker is ready
 touch /tmp/docker-ready
