@@ -139,7 +139,7 @@ jobs:
               --availability-zone "$AZ" \
               --region ${{ env.AWS_REGION }} > /dev/null
 
-            if ssh $SSH_OPTS ec2-user@${INSTANCE_IP} "echo connected" 2>/dev/null; then
+            if ssh $SSH_OPTS ec2-user@${INSTANCE_IP} "echo connected"; then
               echo "SSH ready on attempt $attempt"
               break
             fi
