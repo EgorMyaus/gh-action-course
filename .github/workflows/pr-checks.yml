@@ -1,0 +1,80 @@
+# =============================================================================
+# PR Checks — Fast validation on pull requests to main
+# =============================================================================
+# Cheap, fast quality gate that runs on every PR:
+#   1. yarn install --frozen-lockfile  (fail on stale lockfile)
+#   2. CI=true yarn build              (lint + build check — CRA runs ESLint
+#                                       during build, CI=true turns warnings
+#                                       into errors)
+#   3. yarn test --coverage --ci       (jest with coverage, non-interactive)
+#   4. Upload coverage artifact
+#   5. Write step summary
+#
+# Separate from e2e-tests-aws.yml (which runs expensive AWS E2E tests).
+# This workflow is the fast feedback loop; e2e-tests-aws.yml is the slow/full one.
+#
+# To enforce this as a required check: repo Settings > Branches >
+# Branch protection rules > main > Require status checks > select `validate`.
+# =============================================================================
+
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint + build check
+        env:
+          CI: "true"
+        run: yarn build
+
+      - name: Run tests with coverage
+        run: yarn test --coverage --watchAll=false --ci
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-pr-${{ github.event.pull_request.number }}
+          path: coverage/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: PR summary
+        if: always()
+        run: |
+          {
+            echo "## PR Checks — ${{ job.status }}"
+            echo ""
+            echo "| Check | Status |"
+            echo "|---|---|"
+            echo "| Install deps | ${{ steps.install.outcome || 'ran' }} |"
+            echo "| Lint + build | \`CI=true yarn build\` |"
+            echo "| Tests + coverage | \`yarn test --coverage --ci\` |"
+            echo ""
+            echo "- **Commit:** \`${{ github.sha }}\`"
+            echo "- **PR:** #${{ github.event.pull_request.number }}"
+            echo "- **Coverage:** uploaded as \`coverage-pr-${{ github.event.pull_request.number }}\`"
+          } >> $GITHUB_STEP_SUMMARY
