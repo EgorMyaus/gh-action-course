@@ -1,5 +1,18 @@
 name: E2E Tests on AWS
 
+# =============================================================================
+# 4-job pipeline (refactored from single deploy-and-test monolith):
+#
+#   build-and-push  →  deploy  →  e2e-test  →  cleanup
+#
+# Why the split:
+#   - Per-stage logs/timings are visible as separate job headers in the UI.
+#   - Cleanup runs on its own runner with `if: always()` + `needs: [all]`, so
+#     `terraform destroy` fires even on cancellation or upstream failure.
+#   - Terraform Cloud remote state (workspace
+#     playwright-react-app-dev-ephemeral) makes cross-runner destroy possible.
+# =============================================================================
+
 on:
   push:
     branches: [main, feature/**]
@@ -34,9 +47,34 @@ permissions:
 
 jobs:
   # =====================================================================
-  # JOB 1: Deploy EC2, build image, copy to EC2, run tests
+  # JOB 1: Build Docker image and push to Docker Hub
   # =====================================================================
-  deploy-and-test:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image to Docker Hub
+        run: |
+          docker build \
+            -t "${{ env.DOCKERHUB_IMAGE }}:${{ env.IMAGE_TAG }}" \
+            -t "${{ env.DOCKERHUB_IMAGE }}:latest" .
+          docker push "${{ env.DOCKERHUB_IMAGE }}:${{ env.IMAGE_TAG }}"
+          docker push "${{ env.DOCKERHUB_IMAGE }}:latest"
+
+  # =====================================================================
+  # JOB 2: Terraform apply + pull image on EC2 via Instance Connect
+  # =====================================================================
+  deploy:
+    needs: build-and-push
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -62,14 +100,6 @@ jobs:
           terraform_wrapper: false
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      # =====================================================================
-      # TERRAFORM — Deploy EC2 Infrastructure
-      # =====================================================================
       - name: Terraform Init
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -lock-timeout=5m
@@ -85,23 +115,6 @@ jobs:
           echo "app_url=$(terraform output -raw app_url)" >> "$GITHUB_OUTPUT"
           echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
           echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
-
-      # =====================================================================
-      # DOCKER — Build on runner, push to Docker Hub
-      # =====================================================================
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push Docker image to Docker Hub
-        run: |
-          docker build \
-            -t "${{ env.DOCKERHUB_IMAGE }}:${{ env.IMAGE_TAG }}" \
-            -t "${{ env.DOCKERHUB_IMAGE }}:latest" .
-          docker push "${{ env.DOCKERHUB_IMAGE }}:${{ env.IMAGE_TAG }}"
-          docker push "${{ env.DOCKERHUB_IMAGE }}:latest"
 
       - name: Wait for EC2 to be ready
         run: |
@@ -176,9 +189,22 @@ jobs:
           echo "App did not respond in time!"
           exit 1
 
-      # =====================================================================
-      # E2E TESTS — Run Against AWS EC2
-      # =====================================================================
+  # =====================================================================
+  # JOB 3: Run Playwright E2E tests against deployed EC2
+  # =====================================================================
+  e2e-test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install e2e dependencies
         working-directory: e2e
         run: yarn install --frozen-lockfile
@@ -192,7 +218,7 @@ jobs:
         run: |
           cat > config/hosts.aws.json << EOF
           {
-            "localhost": "${{ steps.tf.outputs.app_url }}/",
+            "localhost": "${{ needs.deploy.outputs.app_url }}/",
             "production": "https://hub.testingtalks.com.au/",
             "api": "https://jsonplaceholder.typicode.com/"
           }
@@ -226,30 +252,39 @@ jobs:
           path: e2e/reports/
           retention-days: 14
 
-      # =====================================================================
-      # IN-JOB DESTROY (first attempt)
-      # =====================================================================
-      - name: Terraform Destroy
-        if: always()
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform destroy -auto-approve -lock-timeout=5m
-
   # =====================================================================
-  # JOB 2: Dedicated Cleanup (runs even if deploy-and-test fails/cancels)
+  # JOB 4: Cleanup — Terraform destroy + orphan termination (always runs)
   # =====================================================================
   cleanup:
-    needs: deploy-and-test
+    needs: [build-and-push, deploy, e2e-test]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+          terraform_wrapper: false
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Destroy
+        continue-on-error: true
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -lock-timeout=5m
+          terraform destroy -auto-approve -lock-timeout=5m
 
       - name: Force-terminate any orphaned EC2 instances
         run: |
@@ -282,10 +317,17 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## E2E Tests on AWS Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image Tag:** ${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Architecture:** EC2 t3.micro (Free Tier)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Cleanup:** Completed" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## E2E Tests on AWS Summary"
+            echo ""
+            echo "| Job | Result |"
+            echo "|---|---|"
+            echo "| build-and-push | ${{ needs.build-and-push.result }} |"
+            echo "| deploy | ${{ needs.deploy.result }} |"
+            echo "| e2e-test | ${{ needs.e2e-test.result }} |"
+            echo ""
+            echo "- **Region:** ${{ env.AWS_REGION }}"
+            echo "- **Commit:** ${{ github.sha }}"
+            echo "- **Image Tag:** ${{ env.IMAGE_TAG }}"
+            echo "- **Architecture:** EC2 t3.micro (Free Tier)"
+          } >> $GITHUB_STEP_SUMMARY
