@@ -1,0 +1,89 @@
+# =============================================================================
+# GCP Custom Role — Terraform CI for dev-ephemeral-gcp
+# =============================================================================
+# Minimum permissions for the service account used by GitLab CI
+# to create/destroy ephemeral GCE infrastructure.
+#
+# Setup:
+#   1. Create a service account:
+#      gcloud iam service-accounts create terraform-ci \
+#        --display-name="Terraform CI (GitLab)"
+#
+#   2. Create the custom role:
+#      gcloud iam roles create TerraformCiEphemeral \
+#        --project=<PROJECT_ID> \
+#        --file=infra/iam/gcp-terraform-ci-role.yaml
+#
+#   3. Bind the role to the service account:
+#      gcloud projects add-iam-policy-binding <PROJECT_ID> \
+#        --member="serviceAccount:terraform-ci@<PROJECT_ID>.iam.gserviceaccount.com" \
+#        --role="projects/<PROJECT_ID>/roles/TerraformCiEphemeral"
+#
+#   4. Export a key and base64-encode it for GitLab CI/CD variable GCP_SA_KEY:
+#      gcloud iam service-accounts keys create sa-key.json \
+#        --iam-account=terraform-ci@<PROJECT_ID>.iam.gserviceaccount.com
+#      base64 -i sa-key.json | pbcopy   # macOS
+#      # Paste into GitLab > Settings > CI/CD > Variables > GCP_SA_KEY (masked)
+#      rm sa-key.json
+#
+#   Production best practice: Use Workload Identity Federation instead of
+#   service account keys. See:
+#   https://cloud.google.com/iam/docs/workload-identity-federation-with-other-providers
+# =============================================================================
+
+title: TerraformCiEphemeral
+description: >-
+  Minimum permissions for GitLab CI to manage ephemeral
+  GCE dev environments via Terraform.
+stage: GA
+includedPermissions:
+  # Compute Engine — instances
+  - compute.instances.create
+  - compute.instances.delete
+  - compute.instances.get
+  - compute.instances.list
+  - compute.instances.setLabels
+  - compute.instances.setMetadata
+  - compute.instances.setTags
+  - compute.instances.start
+  - compute.instances.stop
+  - compute.instances.use
+  # Compute Engine — disks
+  - compute.disks.create
+  - compute.disks.delete
+  - compute.disks.get
+  - compute.disks.list
+  - compute.disks.use
+  # Compute Engine — networking
+  - compute.networks.create
+  - compute.networks.delete
+  - compute.networks.get
+  - compute.networks.list
+  - compute.networks.updatePolicy
+  - compute.subnetworks.create
+  - compute.subnetworks.delete
+  - compute.subnetworks.get
+  - compute.subnetworks.list
+  - compute.subnetworks.use
+  - compute.subnetworks.useExternalIp
+  # Compute Engine — firewall
+  - compute.firewalls.create
+  - compute.firewalls.delete
+  - compute.firewalls.get
+  - compute.firewalls.list
+  # Compute Engine — external IPs
+  - compute.addresses.use
+  # Compute Engine — images (to read public images)
+  - compute.images.get
+  - compute.images.list
+  - compute.images.useReadOnly
+  # Compute Engine — zones/regions
+  - compute.zones.get
+  - compute.zones.list
+  - compute.regions.get
+  - compute.regions.list
+  # Compute Engine — SSH via gcloud compute ssh
+  - compute.projects.get
+  - compute.instances.setMetadata
+  # IAM — use service account on instance (if needed later)
+  - iam.serviceAccounts.actAs

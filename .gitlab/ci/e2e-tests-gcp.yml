@@ -1,0 +1,302 @@
+# =============================================================================
+# E2E Tests on GCP — Ephemeral GCE Environment (GitLab CI)
+# =============================================================================
+# Mirror of .github/workflows/e2e-tests-aws.yml but for GCP + GitLab CI.
+#
+# Pipeline:
+#   1. build-push    — Build Docker image, push to Docker Hub
+#   2. deploy-gcp    — Terraform apply (GCE + VPC), pull image via SSH
+#   3. e2e-test-gcp  — Run Cucumber-Playwright tests against GCE IP
+#   4. cleanup-gcp   — Terraform destroy + orphan instance check
+#
+# Required GitLab CI/CD Variables:
+#   GCP_PROJECT_ID          — GCP project ID
+#   GCP_SA_KEY              — Service account key JSON (base64-encoded)
+#   GCP_REGION              — (optional, default: us-central1)
+#   DOCKERHUB_USERNAME      — Docker Hub username
+#   DOCKERHUB_TOKEN         — Docker Hub access token
+#   TF_API_TOKEN            — Terraform Cloud API token
+#   TF_CLOUD_ORGANIZATION   — Terraform Cloud organization name
+#
+# GCP Service Account permissions needed:
+#   - Compute Admin (roles/compute.admin)
+#   - Service Account User (roles/iam.serviceAccountUser)
+#   See: infra/iam/gcp-terraform-ci-role.yaml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+variables:
+  GCP_REGION: ${GCP_REGION:-us-central1}
+  GCP_ZONE: ${GCP_ZONE:-us-central1-a}
+  TF_DIR_GCP: infra/environments/dev-ephemeral-gcp
+  DOCKERHUB_IMAGE: ${DOCKERHUB_USERNAME}/react-app
+  GCP_IMAGE_TAG: ${CI_COMMIT_SHORT_SHA}
+
+# ---------------------------------------------------------------------------
+# JOB 1: Build Docker image and push to Docker Hub
+# ---------------------------------------------------------------------------
+e2e-gcp:build-push:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u "$DOCKERHUB_USERNAME" -p "$DOCKERHUB_TOKEN"
+  script:
+    - echo "Building Docker image..."
+    - docker build
+        -t "$DOCKERHUB_IMAGE:$GCP_IMAGE_TAG"
+        -t "$DOCKERHUB_IMAGE:latest"
+        .
+    - echo "Pushing to Docker Hub..."
+    - docker push "$DOCKERHUB_IMAGE:$GCP_IMAGE_TAG"
+    - docker push "$DOCKERHUB_IMAGE:latest"
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ---------------------------------------------------------------------------
+# JOB 2: Deploy GCE infrastructure + pull Docker image on instance
+# ---------------------------------------------------------------------------
+e2e-gcp:deploy:
+  stage: deploy-staging
+  image: google/cloud-sdk:slim
+  timeout: 20 minutes
+  before_script:
+    # --- Install Terraform ---
+    - apt-get update -qq && apt-get install -y -qq unzip curl > /dev/null
+    - curl -fsSL https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip
+        -o /tmp/terraform.zip
+    - unzip -q /tmp/terraform.zip -d /usr/local/bin/
+    - terraform --version
+
+    # --- Authenticate to GCP ---
+    - echo "$GCP_SA_KEY" | base64 -d > /tmp/gcp-sa-key.json
+    - gcloud auth activate-service-account --key-file=/tmp/gcp-sa-key.json
+    - gcloud config set project "$GCP_PROJECT_ID"
+    - gcloud config set compute/region "$GCP_REGION"
+    - gcloud config set compute/zone "$GCP_ZONE"
+
+    # --- Terraform Cloud credentials ---
+    - |
+      mkdir -p ~/.terraform.d
+      cat > ~/.terraform.d/credentials.tfrc.json << CRED_EOF
+      {
+        "credentials": {
+          "app.terraform.io": {
+            "token": "$TF_API_TOKEN"
+          }
+        }
+      }
+      CRED_EOF
+
+  script:
+    # --- Terraform: provision GCE ---
+    - cd "$TF_DIR_GCP"
+    - export TF_VAR_gcp_project_id="$GCP_PROJECT_ID"
+    - export TF_VAR_gcp_region="$GCP_REGION"
+    - export TF_VAR_gcp_zone="$GCP_ZONE"
+    - terraform init -lock-timeout=5m
+    - terraform apply -auto-approve -lock-timeout=5m
+
+    # --- Capture outputs ---
+    - export APP_URL=$(terraform output -raw app_url)
+    - export INSTANCE_NAME=$(terraform output -raw instance_name)
+    - export INSTANCE_ZONE=$(terraform output -raw instance_zone)
+    - export INSTANCE_IP=$(terraform output -raw instance_public_ip)
+
+    # --- Wait for instance to be ready ---
+    - echo "Waiting for instance $INSTANCE_NAME to be running..."
+    - |
+      for i in $(seq 1 30); do
+        STATUS=$(gcloud compute instances describe "$INSTANCE_NAME" \
+          --zone="$INSTANCE_ZONE" --format="value(status)")
+        if [ "$STATUS" = "RUNNING" ]; then
+          echo "Instance is RUNNING after attempt $i"
+          break
+        fi
+        echo "Attempt $i/30 — status: $STATUS, waiting 10s..."
+        sleep 10
+      done
+
+    # --- Wait for Docker to be installed (startup script) ---
+    - echo "Waiting for Docker to be ready on instance..."
+    - |
+      for i in $(seq 1 30); do
+        if gcloud compute ssh "$INSTANCE_NAME" --zone="$INSTANCE_ZONE" \
+          --command="test -f /tmp/docker-ready" --ssh-flag="-o StrictHostKeyChecking=no" 2>/dev/null; then
+          echo "Docker is ready after attempt $i!"
+          break
+        fi
+        echo "Attempt $i/30 — waiting 10s..."
+        sleep 10
+      done
+
+    # --- SSH: pull image and start container ---
+    - |
+      gcloud compute ssh "$INSTANCE_NAME" --zone="$INSTANCE_ZONE" \
+        --ssh-flag="-o StrictHostKeyChecking=no" \
+        --command="
+          sudo docker pull $DOCKERHUB_IMAGE:latest
+          sudo docker run -d --name react-app -p 80:80 --restart unless-stopped $DOCKERHUB_IMAGE:latest
+          sudo docker ps
+        "
+
+    # --- Wait for app to respond ---
+    - echo "Waiting for $APP_URL to respond..."
+    - |
+      for i in $(seq 1 30); do
+        if curl -sf "$APP_URL" > /dev/null 2>&1; then
+          echo "App is responding after attempt $i!"
+          break
+        fi
+        echo "Attempt $i/30 — waiting 5s..."
+        sleep 5
+      done
+
+    # --- Write outputs for downstream jobs (relative to repo root) ---
+    - cd "$CI_PROJECT_DIR"
+    - echo "APP_URL=$APP_URL" >> deploy-gcp.env
+    - echo "INSTANCE_NAME=$INSTANCE_NAME" >> deploy-gcp.env
+    - echo "INSTANCE_ZONE=$INSTANCE_ZONE" >> deploy-gcp.env
+    - echo "INSTANCE_IP=$INSTANCE_IP" >> deploy-gcp.env
+
+  artifacts:
+    reports:
+      dotenv: deploy-gcp.env
+    expire_in: 1 hour
+  needs:
+    - e2e-gcp:build-push
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ---------------------------------------------------------------------------
+# JOB 3: Run E2E Tests against GCE instance
+# ---------------------------------------------------------------------------
+e2e-gcp:test:
+  stage: e2e-test
+  image: mcr.microsoft.com/playwright:v1.59.1-noble
+  timeout: 15 minutes
+  variables:
+    NODE_ENV: localhost
+    COMMON_CONFIG_FILE: env/common.env
+    HEADLESS: "true"
+    HOSTS_URLS_PATH: /config/hosts.gcp.json
+  before_script:
+    - cd e2e
+    - npm install --legacy-peer-deps
+    - npx playwright install --with-deps chromium
+  script:
+    # --- Generate hosts config pointing to GCE IP ---
+    - |
+      cat > config/hosts.gcp.json << HOST_EOF
+      {
+        "localhost": "$APP_URL/",
+        "production": "https://hub.testingtalks.com.au/",
+        "api": "https://jsonplaceholder.typicode.com/"
+      }
+      HOST_EOF
+    - echo "Generated hosts.gcp.json:"
+    - cat config/hosts.gcp.json
+
+    # --- Pick profile: smoke for feature branches, regression for main ---
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        PROFILE="regression"
+      else
+        PROFILE="smoke"
+      fi
+      echo "Running profile: $PROFILE"
+    - npm run precucumber
+    - npm run transpile
+    - npx cucumber-js -p "$PROFILE"
+
+  after_script:
+    - echo "E2E tests completed"
+  artifacts:
+    when: always
+    paths:
+      - e2e/reports/
+      - e2e/test-results/
+    expire_in: 14 days
+  needs:
+    - e2e-gcp:deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ---------------------------------------------------------------------------
+# JOB 4: Cleanup — Terraform destroy + orphan check (always runs)
+# ---------------------------------------------------------------------------
+e2e-gcp:cleanup:
+  stage: .post
+  image: google/cloud-sdk:slim
+  timeout: 10 minutes
+  when: always
+  before_script:
+    # --- Install Terraform ---
+    - apt-get update -qq && apt-get install -y -qq unzip curl > /dev/null
+    - curl -fsSL https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip
+        -o /tmp/terraform.zip
+    - unzip -q /tmp/terraform.zip -d /usr/local/bin/
+
+    # --- Authenticate to GCP ---
+    - echo "$GCP_SA_KEY" | base64 -d > /tmp/gcp-sa-key.json
+    - gcloud auth activate-service-account --key-file=/tmp/gcp-sa-key.json
+    - gcloud config set project "$GCP_PROJECT_ID"
+
+    # --- Terraform Cloud credentials ---
+    - |
+      mkdir -p ~/.terraform.d
+      cat > ~/.terraform.d/credentials.tfrc.json << CRED_EOF
+      {
+        "credentials": {
+          "app.terraform.io": {
+            "token": "$TF_API_TOKEN"
+          }
+        }
+      }
+      CRED_EOF
+
+  script:
+    # --- Terraform destroy ---
+    - cd "$TF_DIR_GCP"
+    - export TF_VAR_gcp_project_id="$GCP_PROJECT_ID"
+    - export TF_VAR_gcp_region="$GCP_REGION"
+    - export TF_VAR_gcp_zone="$GCP_ZONE"
+    - terraform init -lock-timeout=5m
+    - terraform destroy -auto-approve -lock-timeout=5m || true
+
+    # --- Force-delete orphaned instances by label ---
+    - |
+      echo "Checking for orphaned instances..."
+      INSTANCES=$(gcloud compute instances list \
+        --filter="labels.project=$CI_PROJECT_NAME AND labels.environment=dev-ephemeral AND status!=TERMINATED" \
+        --format="value(name,zone)" 2>/dev/null || true)
+
+      if [ -n "$INSTANCES" ]; then
+        echo "Terminating orphaned instances:"
+        echo "$INSTANCES"
+        echo "$INSTANCES" | while read -r NAME ZONE; do
+          gcloud compute instances delete "$NAME" --zone="$ZONE" --quiet || true
+        done
+      else
+        echo "No orphaned instances found."
+      fi
+
+    # --- Cost guard: list any remaining instances ---
+    - echo "## Running instances check:"
+    - gcloud compute instances list
+        --filter="labels.project=playwright-react-app"
+        --format="table(name,zone,status,creationTimestamp)" || true
+
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+      when: always
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: always
