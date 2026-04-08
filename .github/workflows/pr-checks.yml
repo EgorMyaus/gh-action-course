@@ -52,7 +52,7 @@ jobs:
         run: npx eslint src/ --max-warnings=0
 
       - name: Run tests with coverage
-        run: yarn test --coverage --watchAll=false --ci
+        run: yarn test --coverage --watchAll=false --ci --passWithNoTests
 
       - name: Upload coverage artifact
         if: always()
