@@ -124,15 +124,32 @@ jobs:
           # Generate temporary SSH key
           ssh-keygen -t ed25519 -f /tmp/ec2_key -N "" -q
 
-          # Push public key via EC2 Instance Connect (valid for 60s)
-          aws ec2-instance-connect send-ssh-public-key \
-            --instance-id "$INSTANCE_ID" \
-            --instance-os-user ec2-user \
-            --ssh-public-key file:///tmp/ec2_key.pub \
-            --availability-zone "$AZ" \
-            --region ${{ env.AWS_REGION }}
+          SSH_OPTS="-i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
-          SSH_OPTS="-i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+          # Retry loop: re-push key via EC2 Instance Connect (60s TTL) and
+          # probe SSH until the on-instance helper has written authorized_keys.
+          # Handles race between `send-ssh-public-key` success and the helper
+          # daemon actually installing the key.
+          for attempt in 1 2 3 4 5 6; do
+            echo "SSH attempt $attempt/6..."
+            aws ec2-instance-connect send-ssh-public-key \
+              --instance-id "$INSTANCE_ID" \
+              --instance-os-user ec2-user \
+              --ssh-public-key file:///tmp/ec2_key.pub \
+              --availability-zone "$AZ" \
+              --region ${{ env.AWS_REGION }} > /dev/null
+
+            if ssh $SSH_OPTS ec2-user@${INSTANCE_IP} "echo connected" 2>/dev/null; then
+              echo "SSH ready on attempt $attempt"
+              break
+            fi
+
+            if [ $attempt -eq 6 ]; then
+              echo "SSH failed after 6 attempts"
+              exit 1
+            fi
+            sleep 5
+          done
 
           # SSH to EC2: pull public image from Docker Hub and run
           ssh $SSH_OPTS ec2-user@${INSTANCE_IP} << ENDSSH
