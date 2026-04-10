@@ -1,0 +1,193 @@
+# =============================================================================
+# Security Scanning — 4 parallel jobs covering OWASP supply-chain categories
+# =============================================================================
+#
+#   1. secret-scan      — gitleaks: scans git history + working tree for
+#                          leaked credentials (API keys, tokens, passwords).
+#   2. dependency-scan   — Trivy filesystem: scans yarn.lock / package.json
+#                          for known CVEs in npm dependencies.
+#   3. image-scan        — Trivy image: builds the Docker image locally and
+#                          scans the final NGINX layer for OS + app CVEs.
+#   4. sast              — CodeQL: GitHub-native static analysis for JS/TS.
+#                          Findings appear in repo Security > Code scanning.
+#
+# Severity policy:
+#   - FAIL on:    HIGH, CRITICAL
+#   - REPORT on:  MEDIUM, LOW  (visible in SARIF / Security tab)
+#   - Rollout:    all jobs run with `continue-on-error: true` initially.
+#                 Once baseline is clean, flip to hard-fail per job.
+#
+# SARIF uploads:  Trivy + CodeQL results are uploaded to the repo's
+#                 Security > Code scanning alerts tab via upload-sarif.
+#
+# Triggers:
+#   - pull_request to main   — catch before merge
+#   - push to main           — track main's state
+#   - weekly schedule         — detect new CVEs published after merge
+#   - workflow_dispatch       — manual trigger
+# =============================================================================
+
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"   # Every Monday at 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # =====================================================================
+  # JOB 1: Secret Scan — gitleaks
+  # =====================================================================
+  secret-scan:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for git log scanning
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =====================================================================
+  # JOB 2: Dependency Scan — Trivy filesystem
+  # =====================================================================
+  dependency-scan:
+    name: Dependency Scan (Trivy fs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-fs-results.sarif"
+          severity: "MEDIUM,HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Upload Trivy fs SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-fs-results.sarif"
+          category: "trivy-dependency-scan"
+
+      - name: Dependency scan summary
+        if: always()
+        run: |
+          {
+            echo "## Dependency Scan (Trivy fs)"
+            echo ""
+            echo "- **Severity filter:** MEDIUM, HIGH, CRITICAL"
+            echo "- **Unfixed CVEs:** ignored (\`--ignore-unfixed\`)"
+            echo "- **Exit code 1** on HIGH/CRITICAL findings"
+            echo "- Full results: **Security > Code scanning alerts**"
+          } >> $GITHUB_STEP_SUMMARY
+
+  # =====================================================================
+  # JOB 3: Docker Image Scan — Trivy image
+  # =====================================================================
+  image-scan:
+    name: Image Scan (Trivy image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image (local only — not pushed)
+        run: docker build -t react-app:scan .
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: "image"
+          image-ref: "react-app:scan"
+          format: "sarif"
+          output: "trivy-image-results.sarif"
+          severity: "MEDIUM,HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Upload Trivy image SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-image-results.sarif"
+          category: "trivy-image-scan"
+
+      - name: Image scan summary
+        if: always()
+        run: |
+          {
+            echo "## Image Scan (Trivy image)"
+            echo ""
+            echo "- **Image:** \`react-app:scan\` (built locally, not pushed)"
+            echo "- **Base image:** \`nginx:1.27.0-alpine\`"
+            echo "- **Severity filter:** MEDIUM, HIGH, CRITICAL"
+            echo "- **Unfixed CVEs:** ignored"
+            echo "- Full results: **Security > Code scanning alerts**"
+          } >> $GITHUB_STEP_SUMMARY
+
+  # =====================================================================
+  # JOB 4: SAST — CodeQL (JavaScript/TypeScript)
+  # =====================================================================
+  sast:
+    name: SAST (CodeQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "codeql-sast"
+
+      - name: SAST summary
+        if: always()
+        run: |
+          {
+            echo "## SAST (CodeQL)"
+            echo ""
+            echo "- **Languages:** JavaScript, TypeScript"
+            echo "- **Query suite:** security-and-quality"
+            echo "- Full results: **Security > Code scanning alerts**"
+          } >> $GITHUB_STEP_SUMMARY
