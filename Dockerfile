@@ -8,7 +8,7 @@
 # =============================================================================
 # STAGE 1: Build
 # =============================================================================
-FROM node:18-alpine AS build
+FROM node:20-alpine AS build
 
 # Set working directory
 WORKDIR /app
@@ -30,7 +30,10 @@ RUN yarn build
 # =============================================================================
 # STAGE 2: Production
 # =============================================================================
-FROM nginx:1.27.0-alpine
+FROM nginx:1.27-alpine
+
+# Patch all Alpine OS-level CVEs (openssl, libexpat, libxml2, etc.)
+RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
 
 # Copy built files from build stage
 COPY --from=build /app/build /usr/share/nginx/html

@@ -15,7 +15,7 @@ name: E2E Tests on AWS
 
 on:
   push:
-    branches: [main, feature/**]
+    branches: [main]
   workflow_dispatch:
     inputs:
       aws_region:
