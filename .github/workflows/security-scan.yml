@@ -79,7 +79,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Trivy filesystem scan
+      - name: Trivy filesystem scan (table — human-readable)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "table"
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy filesystem scan (SARIF — for Security tab)
+        if: always()
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: "fs"
@@ -88,7 +99,7 @@ jobs:
           output: "trivy-fs-results.sarif"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: "0"
 
       - name: Upload Trivy fs SARIF
         if: always()
@@ -124,7 +135,19 @@ jobs:
       - name: Build Docker image (local only — not pushed)
         run: docker build -t react-app:scan .
 
-      - name: Trivy image scan
+      - name: Trivy image scan (table — human-readable)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: "image"
+          image-ref: "react-app:scan"
+          scanners: "vuln"
+          format: "table"
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy image scan (SARIF — for Security tab)
+        if: always()
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: "image"
@@ -134,7 +157,7 @@ jobs:
           output: "trivy-image-results.sarif"
           severity: "HIGH,CRITICAL"
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: "0"
 
       - name: Upload Trivy image SARIF
         if: always()
