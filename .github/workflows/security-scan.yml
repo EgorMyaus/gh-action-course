@@ -132,8 +132,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build Docker image (local only — not pushed)
-        run: docker build -t react-app:scan .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: react-app:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Trivy image scan (table — human-readable)
         uses: aquasecurity/trivy-action@0.35.0
