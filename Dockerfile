@@ -30,7 +30,7 @@ RUN yarn build
 # =============================================================================
 # STAGE 2: Production
 # =============================================================================
-FROM nginx:1.27.0-alpine
+FROM nginx:1.27-alpine
 
 # Copy built files from build stage
 COPY --from=build /app/build /usr/share/nginx/html
