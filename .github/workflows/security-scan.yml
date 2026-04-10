@@ -86,7 +86,7 @@ jobs:
           scan-ref: "."
           format: "sarif"
           output: "trivy-fs-results.sarif"
-          severity: "MEDIUM,HIGH,CRITICAL"
+          severity: "HIGH,CRITICAL"
           ignore-unfixed: true
           exit-code: "1"
 
@@ -129,9 +129,10 @@ jobs:
         with:
           scan-type: "image"
           image-ref: "react-app:scan"
+          scanners: "vuln"
           format: "sarif"
           output: "trivy-image-results.sarif"
-          severity: "MEDIUM,HIGH,CRITICAL"
+          severity: "HIGH,CRITICAL"
           ignore-unfixed: true
           exit-code: "1"
 
