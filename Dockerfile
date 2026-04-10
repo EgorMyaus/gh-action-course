@@ -32,6 +32,9 @@ RUN yarn build
 # =============================================================================
 FROM nginx:1.27-alpine
 
+# Patch all Alpine OS-level CVEs (openssl, libexpat, libxml2, etc.)
+RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
+
 # Copy built files from build stage
 COPY --from=build /app/build /usr/share/nginx/html
 
