@@ -54,8 +54,10 @@ provider "aws" {
 }
 
 locals {
-  name_prefix = "${var.project_name}-dev"
-  environment = "dev-ephemeral"
+  name_prefix    = "${var.project_name}-dev"
+  environment    = "dev-ephemeral"
+  use_custom_ami = var.custom_ami_id != ""
+  ami_id         = local.use_custom_ami ? var.custom_ami_id : data.aws_ami.amazon_linux.id
 
   # Computed values — DRY references used across resources
   vpc_cidr    = "10.0.0.0/16"
@@ -190,28 +192,29 @@ resource "aws_security_group" "app" {
 # =============================================================================
 
 resource "aws_instance" "app" {
-  ami                         = data.aws_ami.amazon_linux.id
+  ami                         = local.ami_id
   instance_type               = var.instance_type
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.app.id]
   associate_public_ip_address = true
 
+  # Works with both stock AL2023 and Packer-built AMIs:
+  # if Docker is already installed (Packer AMI), skips dnf install.
   user_data = <<-EOF
 #!/bin/bash
 exec > /var/log/user-data.log 2>&1
 set -ex
 
-# Install Docker + EC2 Instance Connect helper
-# AL2023 minimal does NOT ship with ec2-instance-connect by default —
-# without this the send-ssh-public-key API succeeds but the key is
-# never written to authorized_keys, so SSH auth fails.
-dnf update -y
-dnf install -y docker ec2-instance-connect
-systemctl start docker
-systemctl enable docker
-systemctl enable --now ec2-instance-connect || true
+if ! command -v docker &> /dev/null; then
+  # Stock AL2023 AMI: install Docker + EC2 Instance Connect from scratch
+  dnf update -y
+  dnf install -y docker ec2-instance-connect
+  systemctl enable docker
+  systemctl enable --now ec2-instance-connect || true
+fi
 
-# Signal that Docker is ready
+# Start Docker (both paths need this)
+systemctl start docker
 touch /tmp/docker-ready
 EOF
 
