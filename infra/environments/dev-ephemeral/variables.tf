@@ -24,3 +24,9 @@ variable "github_repo" {
   type        = string
 }
 
+variable "custom_ami_id" {
+  description = "Custom Packer-built AMI ID. When set, skips the stock AL2023 lookup and uses this AMI instead."
+  type        = string
+  default     = ""
+}
+

@@ -1,14 +1,19 @@
 name: E2E Tests on AWS
 
 # =============================================================================
-# 4-job pipeline (refactored from single deploy-and-test monolith):
+# 5-job pipeline:
 #
-#   build-and-push  →  deploy  →  e2e-test  →  cleanup
+#   build-and-push ──┐
+#                    ├──→ deploy → e2e-test → cleanup
+#   packer-build ────┘
 #
 # Why the split:
 #   - Per-stage logs/timings are visible as separate job headers in the UI.
+#   - build-and-push and packer-build run in parallel (no dependency).
+#   - deploy waits for both: Docker image on Hub + custom AMI ready.
 #   - Cleanup runs on its own runner with `if: always()` + `needs: [all]`, so
 #     `terraform destroy` fires even on cancellation or upstream failure.
+#   - Cleanup also deregisters the ephemeral Packer AMI + deletes its snapshot.
 #   - Terraform Cloud remote state (workspace
 #     playwright-react-app-dev-ephemeral) makes cross-runner destroy possible.
 # =============================================================================
@@ -77,10 +82,49 @@ jobs:
           cache-to: type=gha,mode=max
 
   # =====================================================================
-  # JOB 2: Terraform apply + pull image on EC2 via Instance Connect
+  # JOB 2: Build Packer AMI (parallel with build-and-push)
+  # =====================================================================
+  packer-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      ami_id: ${{ steps.build.outputs.ami_id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: latest
+
+      - name: Packer Init
+        working-directory: packer
+        run: packer init web-server.pkr.hcl
+
+      - name: Packer Build
+        id: build
+        working-directory: packer
+        run: |
+          packer build -var "aws_region=${{ env.AWS_REGION }}" \
+            -machine-readable web-server.pkr.hcl | tee packer-output.txt
+
+          AMI_ID=$(grep 'artifact,0,id' packer-output.txt | cut -d: -f2)
+          echo "Built AMI: $AMI_ID"
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
+  # =====================================================================
+  # JOB 3: Terraform apply + pull image on EC2 via Instance Connect
   # =====================================================================
   deploy:
-    needs: build-and-push
+    needs: [build-and-push, packer-build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -112,6 +156,8 @@ jobs:
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_custom_ami_id: ${{ needs.packer-build.outputs.ami_id }}
         run: terraform apply -auto-approve -lock-timeout=5m
 
       - name: Get Terraform outputs
@@ -196,7 +242,7 @@ jobs:
           exit 1
 
   # =====================================================================
-  # JOB 3: Run Playwright E2E tests against deployed EC2
+  # JOB 4: Run Playwright E2E tests against deployed EC2
   # =====================================================================
   e2e-test:
     needs: deploy
@@ -274,10 +320,10 @@ jobs:
           retention-days: 14
 
   # =====================================================================
-  # JOB 4: Cleanup — Terraform destroy + orphan termination (always runs)
+  # JOB 5: Cleanup — Terraform destroy + AMI deregister + orphan termination
   # =====================================================================
   cleanup:
-    needs: [build-and-push, deploy, e2e-test]
+    needs: [build-and-push, packer-build, deploy, e2e-test]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -306,6 +352,30 @@ jobs:
         run: |
           terraform init -lock-timeout=5m
           terraform destroy -auto-approve -lock-timeout=5m
+
+      - name: Deregister Packer AMI + delete snapshot
+        if: needs.packer-build.outputs.ami_id != ''
+        continue-on-error: true
+        run: |
+          AMI_ID="${{ needs.packer-build.outputs.ami_id }}"
+          echo "Deregistering AMI: $AMI_ID"
+
+          # Get snapshot ID before deregistering (AMI metadata is lost after deregister)
+          SNAPSHOT_ID=$(aws ec2 describe-images \
+            --image-ids "$AMI_ID" \
+            --query "Images[0].BlockDeviceMappings[0].Ebs.SnapshotId" \
+            --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+
+          # Deregister AMI
+          aws ec2 deregister-image --image-id "$AMI_ID" --region ${{ env.AWS_REGION }} || true
+
+          # Delete backing snapshot
+          if [ -n "$SNAPSHOT_ID" ] && [ "$SNAPSHOT_ID" != "None" ]; then
+            echo "Deleting snapshot: $SNAPSHOT_ID"
+            aws ec2 delete-snapshot --snapshot-id "$SNAPSHOT_ID" --region ${{ env.AWS_REGION }} || true
+          fi
+
+          echo "AMI cleanup complete"
 
       - name: Force-terminate any orphaned EC2 instances
         run: |
@@ -344,11 +414,13 @@ jobs:
             echo "| Job | Result |"
             echo "|---|---|"
             echo "| build-and-push | ${{ needs.build-and-push.result }} |"
+            echo "| packer-build | ${{ needs.packer-build.result }} |"
             echo "| deploy | ${{ needs.deploy.result }} |"
             echo "| e2e-test | ${{ needs.e2e-test.result }} |"
             echo ""
             echo "- **Region:** ${{ env.AWS_REGION }}"
             echo "- **Commit:** ${{ github.sha }}"
             echo "- **Image Tag:** ${{ env.IMAGE_TAG }}"
+            echo "- **Packer AMI:** \`${{ needs.packer-build.outputs.ami_id }}\` (ephemeral — deregistered)"
             echo "- **Architecture:** EC2 t3.micro (Free Tier)"
           } >> $GITHUB_STEP_SUMMARY
