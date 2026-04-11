@@ -49,20 +49,20 @@ provider "aws" {
   region = var.aws_region
 
   default_tags {
-    tags = {
-      Environment = "dev-ephemeral"
-      ManagedBy   = "Terraform"
-      Project     = var.project_name
-      TTL         = "1h"
-      Owner       = "github-actions"
-    }
+    tags = local.common_tags
   }
 }
 
 locals {
   name_prefix = "${var.project_name}-dev"
+  environment = "dev-ephemeral"
+
+  # Computed values — DRY references used across resources
+  vpc_cidr    = "10.0.0.0/16"
+  public_cidr = "10.0.1.0/24"
+
   common_tags = {
-    Environment = "dev-ephemeral"
+    Environment = local.environment
     ManagedBy   = "Terraform"
     Project     = var.project_name
     TTL         = "1h"
@@ -98,7 +98,7 @@ data "aws_ami" "amazon_linux" {
 # =============================================================================
 
 resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
+  cidr_block           = local.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
 
@@ -109,7 +109,7 @@ resource "aws_vpc" "main" {
 
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.1.0/24"
+  cidr_block              = local.public_cidr
   availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
 
