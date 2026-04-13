@@ -1,33 +1,18 @@
 # =============================================================================
-# COMPUTE MODULE - OUTPUTS
+# COMPUTE MODULE — OUTPUTS
 # =============================================================================
 
 output "instance_id" {
   description = "EC2 instance ID"
-  value       = aws_instance.web.id
+  value       = aws_instance.app.id
 }
 
 output "public_ip" {
-  description = "Public IP address"
-  value       = aws_instance.web.public_ip
-}
-
-output "public_dns" {
-  description = "Public DNS name"
-  value       = aws_instance.web.public_dns
+  description = "Public IP address of the EC2 instance"
+  value       = aws_instance.app.public_ip
 }
 
 output "security_group_id" {
-  description = "Security group ID"
-  value       = aws_security_group.web.id
-}
-
-output "key_name" {
-  description = "Key pair name"
-  value       = aws_key_pair.main.key_name
-}
-
-output "ssh_command" {
-  description = "SSH command"
-  value       = "ssh -i ~/.ssh/id_rsa ubuntu@${aws_instance.web.public_ip}"
+  description = "ID of the app security group"
+  value       = aws_security_group.app.id
 }

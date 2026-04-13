@@ -1,14 +1,14 @@
 # =============================================================================
-# NETWORKING MODULE - VARIABLES
+# NETWORKING MODULE — VARIABLES
 # =============================================================================
 
 variable "name_prefix" {
-  description = "Prefix for resource names"
+  description = "Prefix applied to resource Name tags"
   type        = string
 }
 
 variable "common_tags" {
-  description = "Common tags to apply to all resources"
+  description = "Tags merged into every resource in this module"
   type        = map(string)
   default     = {}
 }
@@ -19,13 +19,13 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 }
 
-variable "availability_zones" {
-  description = "List of availability zones"
-  type        = list(string)
+variable "public_subnet_cidr" {
+  description = "CIDR block for the single public subnet"
+  type        = string
+  default     = "10.0.1.0/24"
 }
 
-variable "enable_nat_gateway" {
-  description = "Enable NAT Gateway for private subnet internet access"
-  type        = bool
-  default     = false
+variable "availability_zone" {
+  description = "Availability zone for the public subnet"
+  type        = string
 }

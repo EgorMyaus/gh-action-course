@@ -1,9 +1,13 @@
 # =============================================================================
 # EPHEMERAL DEV ENVIRONMENT — EC2 + Docker (Free Tier)
 # =============================================================================
-# Spins up a single t2.micro EC2 instance with Docker for E2E testing.
+# Spins up a single t3.micro EC2 instance with Docker for E2E testing.
 # Designed to be created and destroyed per CI run.
-# Cost: $0 (within AWS Free Tier — 750 hours/month t2.micro)
+# Cost: $0 (within AWS Free Tier — 750 hours/month t3.micro)
+#
+# Composed from two local modules:
+#   - ../../modules/networking : VPC, public subnet, IGW, route table
+#   - ../../modules/compute    : security group (HTTP + SSH), EC2 instance
 #
 # Usage:
 #   terraform init
@@ -59,10 +63,6 @@ locals {
   use_custom_ami = var.custom_ami_id != ""
   ami_id         = local.use_custom_ami ? var.custom_ami_id : data.aws_ami.amazon_linux.id
 
-  # Computed values — DRY references used across resources
-  vpc_cidr    = "10.0.0.0/16"
-  public_cidr = "10.0.1.0/24"
-
   common_tags = {
     Environment = local.environment
     ManagedBy   = "Terraform"
@@ -70,6 +70,23 @@ locals {
     TTL         = "1h"
     Owner       = "github-actions"
   }
+
+  # Smart user_data: no-op if Docker is already baked into the AMI (Packer),
+  # otherwise install Docker + ec2-instance-connect from scratch.
+  user_data = <<-EOF
+#!/bin/bash
+exec > /var/log/user-data.log 2>&1
+set -ex
+
+if ! command -v docker &> /dev/null; then
+  dnf update -y
+  dnf install -y docker ec2-instance-connect
+  systemctl enable docker
+fi
+
+systemctl start docker
+touch /tmp/docker-ready
+EOF
 }
 
 # =============================================================================
@@ -96,140 +113,27 @@ data "aws_ami" "amazon_linux" {
 }
 
 # =============================================================================
-# NETWORKING — VPC, Subnet, IGW (minimal)
+# MODULES
 # =============================================================================
 
-resource "aws_vpc" "main" {
-  cidr_block           = local.vpc_cidr
-  enable_dns_hostnames = true
-  enable_dns_support   = true
+module "networking" {
+  source = "../../modules/networking"
 
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-vpc"
-  })
+  name_prefix        = local.name_prefix
+  common_tags        = local.common_tags
+  vpc_cidr           = "10.0.0.0/16"
+  public_subnet_cidr = "10.0.1.0/24"
+  availability_zone  = data.aws_availability_zones.available.names[0]
 }
 
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = local.public_cidr
-  availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = true
+module "compute" {
+  source = "../../modules/compute"
 
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-public"
-  })
-}
-
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-igw"
-  })
-}
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-public-rt"
-  })
-}
-
-resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public.id
-}
-
-# =============================================================================
-# SECURITY GROUP — HTTP + SSH
-# =============================================================================
-
-resource "aws_security_group" "app" {
-  name_prefix = "${local.name_prefix}-app-"
-  description = "Allow HTTP and SSH for ephemeral dev environment"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description = "HTTP from anywhere"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "SSH for debugging"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-app-sg"
-  })
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-# =============================================================================
-# EC2 INSTANCE — t3.micro (Free Tier) + Docker
-# =============================================================================
-
-resource "aws_instance" "app" {
-  ami                         = local.ami_id
-  instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.public.id
-  vpc_security_group_ids      = [aws_security_group.app.id]
-  associate_public_ip_address = true
-
-  # Works with both stock AL2023 and Packer-built AMIs:
-  # if Docker is already installed (Packer AMI), skips dnf install.
-  user_data = <<-EOF
-#!/bin/bash
-exec > /var/log/user-data.log 2>&1
-set -ex
-
-if ! command -v docker &> /dev/null; then
-  # Stock AL2023 AMI: install Docker + EC2 Instance Connect from scratch
-  dnf update -y
-  dnf install -y docker ec2-instance-connect
-  systemctl enable docker
-  systemctl enable --now ec2-instance-connect || true
-fi
-
-# Start Docker (both paths need this)
-systemctl start docker
-touch /tmp/docker-ready
-EOF
-
-  user_data_replace_on_change = true
-
-  root_block_device {
-    volume_size = 30
-    volume_type = "gp3"
-  }
-
-  depends_on = [
-    aws_internet_gateway.main,
-  ]
-
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-app"
-  })
+  name_prefix   = local.name_prefix
+  common_tags   = local.common_tags
+  vpc_id        = module.networking.vpc_id
+  subnet_id     = module.networking.public_subnet_id
+  ami_id        = local.ami_id
+  instance_type = var.instance_type
+  user_data     = local.user_data
 }
