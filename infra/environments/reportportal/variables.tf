@@ -27,7 +27,7 @@ variable "vpc_cidr" {
 variable "instance_type" {
   description = "EC2 instance type (t3.xlarge recommended for ReportPortal)"
   type        = string
-  default     = "t3.xlarge"  # 4 vCPU, 16 GB RAM
+  default     = "t3.xlarge" # 4 vCPU, 16 GB RAM
 }
 
 variable "ami_id" {
@@ -39,7 +39,7 @@ variable "ami_id" {
 variable "root_volume_size" {
   description = "Root volume size in GB"
   type        = number
-  default     = 50  # Enough for PostgreSQL, OpenSearch data
+  default     = 50 # Enough for PostgreSQL, OpenSearch data
 }
 
 variable "ssh_public_key_path" {

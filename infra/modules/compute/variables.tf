@@ -1,60 +1,47 @@
 # =============================================================================
-# COMPUTE MODULE - VARIABLES
+# COMPUTE MODULE — VARIABLES
 # =============================================================================
 
 variable "name_prefix" {
-  description = "Prefix for resource names"
+  description = "Prefix applied to resource Name tags"
   type        = string
 }
 
 variable "common_tags" {
-  description = "Common tags"
+  description = "Tags merged into every resource in this module"
   type        = map(string)
   default     = {}
 }
 
 variable "vpc_id" {
-  description = "VPC ID"
+  description = "ID of the VPC where the instance and security group will live"
   type        = string
 }
 
 variable "subnet_id" {
-  description = "Subnet ID for the web server"
+  description = "ID of the public subnet where the instance will launch"
+  type        = string
+}
+
+variable "ami_id" {
+  description = "AMI ID to boot from (caller decides — stock AL2023 lookup or Packer-built)"
   type        = string
 }
 
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t2.micro"
+  default     = "t3.micro"
 }
 
-variable "ssh_public_key_path" {
-  description = "Path to SSH public key"
-  type        = string
-  default     = "~/.ssh/id_rsa.pub"
-}
-
-variable "allowed_ssh_cidr" {
-  description = "CIDR for SSH access"
-  type        = string
-  default     = "0.0.0.0/0"
-}
-
-variable "custom_ami_id" {
-  description = "Custom AMI ID (from Packer)"
+variable "user_data" {
+  description = "User data script executed on first boot"
   type        = string
   default     = ""
 }
 
 variable "root_volume_size" {
-  description = "Root volume size in GB"
+  description = "Root EBS volume size in GB"
   type        = number
-  default     = 20
-}
-
-variable "user_data" {
-  description = "User data script"
-  type        = string
-  default     = ""
+  default     = 30
 }

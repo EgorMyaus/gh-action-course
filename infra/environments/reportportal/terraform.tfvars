@@ -20,5 +20,5 @@ root_volume_size = 50
 ssh_public_key_path = "~/.ssh/id_rsa.pub"
 
 # Access Control - RESTRICT THESE IN PRODUCTION!
-allowed_ssh_cidr     = "0.0.0.0/0"  # Change to your IP: "x.x.x.x/32"
-allowed_access_cidrs = ["0.0.0.0/0"]  # Change to your office/VPN CIDR
+allowed_ssh_cidr     = "0.0.0.0/0"   # Change to your IP: "x.x.x.x/32"
+allowed_access_cidrs = ["0.0.0.0/0"] # Change to your office/VPN CIDR
