@@ -47,7 +47,13 @@ jobs:
           cache: "yarn"
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: |
+          for i in 1 2 3; do
+            yarn install --frozen-lockfile --network-timeout 600000 && exit 0
+            echo "yarn install failed, retry $i/3"
+            sleep $((i * 10))
+          done
+          exit 1
 
       - name: Lint (ESLint on src/)
         run: npx eslint src/ --max-warnings=0
