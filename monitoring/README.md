@@ -3,25 +3,32 @@
 ## Overview
 
 This directory contains a complete monitoring stack:
+- **React App** - target under observation (built from repo `Dockerfile`)
 - **Prometheus** - Metrics collection and storage
 - **Grafana** - Visualization and dashboards
 - **Alertmanager** - Alert routing and notifications
 - **Node Exporter** - Host metrics
-- **cAdvisor** - Container metrics
+- **cAdvisor** - Container metrics (observes the `react-app` container)
 
 ## Quick Start
 
 ```bash
 cd monitoring
 
-# Start the monitoring stack
-docker-compose up -d
+# Build the react-app image and start the full stack
+docker-compose up -d --build
 
 # Access services:
-# - Prometheus: http://localhost:9090
-# - Grafana: http://localhost:3000 (admin/admin123)
+# - React App:    http://localhost:80
+# - Prometheus:   http://localhost:9090
+# - Grafana:      http://localhost:3000 (admin/admin123)
 # - Alertmanager: http://localhost:9093
 ```
+
+The `react-app` container is observed indirectly: cAdvisor exposes per-container
+CPU/memory/network metrics, and the `ContainerDown` alert watches for its
+absence. The app itself does not yet expose a `/metrics` endpoint — adding one
+is a follow-up (Option B: blackbox exporter, or instrument the app directly).
 
 ## Architecture
 
