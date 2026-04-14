@@ -261,7 +261,13 @@ jobs:
 
       - name: Install e2e dependencies
         working-directory: e2e
-        run: yarn install --frozen-lockfile
+        run: |
+          for i in 1 2 3; do
+            yarn install --frozen-lockfile --network-timeout 600000 && exit 0
+            echo "yarn install failed, retry $i/3"
+            sleep $((i * 10))
+          done
+          exit 1
 
       - name: Cache Playwright browsers
         id: playwright-cache
